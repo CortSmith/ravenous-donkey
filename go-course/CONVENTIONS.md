@@ -51,6 +51,14 @@ For each exercise and the project:
 - **Trade-off** — when you'd choose each.
 - **Review checklist** — specific best-practice violations a student is likely to commit here (naming, error handling, receiver choice, exported API, etc.) so the instructor can grade consistently.
 
+## Code blocks in Markdown
+- Every ```` ```go ```` block in a README or REVIEW must run in the site's snippet runner (`cmd/runner`). Check with `go run ./cmd/runner -check -strict modules/NN-slug solutions/NN-slug` (`scripts-verify.sh` runs it too).
+- Fragments are fine: the runner puts top-level `func`/`type`/`import` lines at package level and the rest in `func main`, and adds missing standard-library imports. With `-strict`, a block may not rely on the runner silencing an unused variable.
+- No `...` placeholders. Give a block the definitions it uses and enough of a `main` (or `fmt.Println`) to show its point when run.
+- A block that is *meant* to fail says so in its fence: ```` ```go expect=compile-error ```` or ```` ```go expect=runtime-error ```` (a panic, a deadlock, a failing test). The page then labels it, and the checker requires the failure.
+- To run against the student's code, import their package (`gocourse/modules/NN-slug/...`); REVIEW blocks import `gocourse/solutions/...` and alias what they need (`type Product = inventory.Product`) so the shown code stays identical to the solution.
+- Output that isn't Go (shell commands, program output, diagrams) uses ```` ```sh ```` or ```` ```text ````.
+
 ## Style rules for all course code
 - Follow Effective Go and Go Code Review Comments: MixedCaps, short receiver names, doc comments starting with the identifier name, errors lowercase without punctuation, `%w` wrapping, accept interfaces / return concrete types, no naked returns in long funcs, no `init()` side effects.
 - Table-driven tests with `t.Run` subtests, `t.Helper()` in helpers, `got/want` messages: `t.Errorf("Foo(%q) = %v, want %v", in, got, want)`.

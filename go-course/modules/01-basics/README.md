@@ -49,6 +49,12 @@ var xs []int       // nil slice: len 0, cap 0, safe to append to and range over
 var m map[string]int // nil map: safe to READ, panics on WRITE (see below)
 var sb strings.Builder // ready to use, no constructor needed
 var mu sync.Mutex      // unlocked mutex, ready to use
+
+fmt.Println(n, s == "", p == nil, xs == nil, len(xs), m == nil, m["x"]) // 0 true true true 0 true 0
+sb.WriteString("works")
+mu.Lock()
+mu.Unlock()
+fmt.Println(sb.String())
 ```
 
 **Why it matters:** Go's standard library is designed so that the zero value is
@@ -143,9 +149,12 @@ of a capped view, use `slices.Clone(s)`.
 #### Always use the result of `append`
 
 ```go
-append(s, x)       // compile error: the result is not used
-s2 := append(s, x) // compiles, but now s and s2 may or may not share memory
-s = append(s, x)   // the idiom
+s := make([]int, 2, 10)
+x := 7
+// append(s, x)    // compile error: the result is not used (uncomment to see)
+s2 := append(s, x) // compiles, but now s and s2 share memory (cap was 10)
+s = append(s, 8)   // the idiom
+fmt.Println(s, s2) // [0 0 8] [0 0 8]: the second append overwrote s2[2]
 ```
 
 Because `append` may or may not reallocate, the only safe mental model is
@@ -170,17 +179,21 @@ Each reallocation copies every element and leaves garbage behind. If you know
 (or can bound) the final size, **preallocate** with `make([]T, 0, n)`:
 
 ```go
+type user struct{ Name string }
+users := []user{{"Ada"}, {"Grace"}, {"Linus"}, {"Rob"}, {"Ken"}}
+
 // BAD: up to log2(n) reallocations
-var names []string
+var bad []string
 for _, u := range users {
-    names = append(names, u.Name)
+	bad = append(bad, u.Name)
 }
 
 // GOOD: one allocation
-names := make([]string, 0, len(users))
+good := make([]string, 0, len(users))
 for _, u := range users {
-    names = append(names, u.Name)
+	good = append(good, u.Name)
 }
+fmt.Println(cap(bad), cap(good)) // 8 5: bad grew 1, 2, 4, 8
 ```
 
 Watch out for the most common preallocation bug. `make([]T, n)` makes a slice of
@@ -201,8 +214,10 @@ Use either `make([]T, n)` + index assignment `x[i] = v`, **or**
 src := []int{1, 2, 3}
 dst := make([]int, 0, 3)
 n := copy(dst, src) // n == 0! dst has length 0
+fmt.Println(n, dst) // 0 []
 dst = make([]int, len(src))
-copy(dst, src)      // now [1 2 3]
+n = copy(dst, src)  // now [1 2 3]
+fmt.Println(n, dst) // 3 [1 2 3]
 ```
 
 #### nil vs empty slices
@@ -222,11 +237,13 @@ copy(dst, src)      // now [1 2 3]
 type point struct{ x, y int }
 pts := []point{{1, 2}, {3, 4}}
 for _, p := range pts {
-    p.x = 0 // modifies the copy `p`, not pts
+	p.x = 0 // modifies the copy `p`, not pts
 }
+fmt.Println(pts) // [{1 2} {3 4}]: unchanged
 for i := range pts {
-    pts[i].x = 0 // modifies the element in place
+	pts[i].x = 0 // modifies the element in place
 }
+fmt.Println(pts) // [{0 2} {0 4}]
 ```
 
 #### Slices can keep big arrays alive
@@ -246,18 +263,19 @@ the semantics did not change.)
 
 #### Reading a nil map is fine; writing panics
 
-```go
-var m map[string]int     // nil
+```go expect=runtime-error
+var m map[string]int        // nil
 fmt.Println(m["x"], len(m)) // 0 0   reads return the zero value
-for k, v := range m {}   // zero iterations
-m["x"] = 1               // panic: assignment to entry in nil map
+for range m {               // zero iterations
+}
+m["x"] = 1 // panic: assignment to entry in nil map
 ```
 
 Always initialise before writing: `m := make(map[string]int)` or a literal
 `m := map[string]int{}`. A nil map **field** inside a struct is the common
 version of this bug:
 
-```go
+```go expect=runtime-error
 type Index struct{ words map[string]int }
 var idx Index
 idx.words["go"]++ // panic, the field's zero value is nil
@@ -268,18 +286,23 @@ Give such types a constructor, or initialise the map lazily on first write.
 #### Comma-ok distinguishes "missing" from "zero"
 
 ```go
+m := map[string]int{"a": 0}
 v := m["z"]       // 0 if missing. Was it missing, or stored as 0?
-v, ok := m["z"]   // ok == false means missing
+v2, ok := m["z"]  // ok == false means missing
+v3, ok3 := m["a"] // stored as 0: ok3 == true
+fmt.Println(v, v2, ok, v3, ok3) // 0 0 false 0 true
 ```
 
 The zero-value default is *useful*: counting needs no existence check, because
 a missing key reads as 0:
 
 ```go
+words := strings.Fields("the cat saw the other cat")
 counts := make(map[string]int)
 for _, w := range words {
-    counts[w]++ // works for new and existing keys
+	counts[w]++ // works for new and existing keys
 }
+fmt.Println(counts) // map[cat:2 other:1 saw:1 the:2] (fmt sorts map keys)
 ```
 
 #### Iteration order is random, on purpose
@@ -311,7 +334,9 @@ occupies zero bytes:
 ```go
 seen := make(map[string]struct{})
 seen["go"] = struct{}{}
-if _, ok := seen["go"]; ok { /* present */ }
+if _, ok := seen["go"]; ok {
+	fmt.Println("go is present")
+}
 ```
 
 `map[K]bool` is also fine and reads nicely (`if seen[k]`). Prefer `struct{}` when
@@ -391,16 +416,16 @@ this limit rather than pretend it isn't there.
 #### Useful `strings` functions (and their traps)
 
 ```go
-strings.Fields("  a  b\tc ")             // ["a" "b" "c"]  splits on any whitespace run
-strings.FieldsFunc(s, f)                 // splits where f(rune) is true
-strings.Split("a,b,", ",")               // ["a" "b" ""]   keeps empties
-strings.Join([]string{"a", "b"}, "-")    // "a-b"
-strings.EqualFold("Go", "GO")            // true. Case-insensitive compare without allocating
-strings.Cut("key=value", "=")            // "key", "value", true
-strings.TrimSpace("  x \n")              // "x"
+fmt.Printf("%q\n", strings.Fields("  a  b\tc "))          // ["a" "b" "c"]  splits on any whitespace run
+fmt.Printf("%q\n", strings.FieldsFunc("a1b22c", unicode.IsDigit)) // ["a" "b" "c"]  splits where f(rune) is true
+fmt.Printf("%q\n", strings.Split("a,b,", ","))            // ["a" "b" ""]   keeps empties
+fmt.Println(strings.Join([]string{"a", "b"}, "-"))        // a-b
+fmt.Println(strings.EqualFold("Go", "GO"))                // true. Case-insensitive compare without allocating
+fmt.Println(strings.Cut("key=value", "="))                // key value true
+fmt.Printf("%q\n", strings.TrimSpace("  x \n"))           // "x"
 
-strings.TrimRight("abba", "ba")  // ""     removes any trailing chars in the SET {b,a}
-strings.TrimSuffix("abba", "ba") // "ab"   removes ONE exact suffix
+fmt.Printf("%q\n", strings.TrimRight("abba", "ba"))  // ""     removes any trailing chars in the SET {b,a}
+fmt.Printf("%q\n", strings.TrimSuffix("abba", "ba")) // "ab"   removes ONE exact suffix
 ```
 
 `TrimLeft`/`TrimRight` taking a *cutset* rather than a prefix/suffix is a
@@ -415,21 +440,24 @@ Strings are immutable, so `s += x` allocates a new string and copies everything
 so far. In a loop that is **O(n²)**:
 
 ```go
+words := []string{"go", "is", "fun"}
+
 // BAD: quadratic copying
 s := ""
 for _, w := range words {
-    s += w + ","
+	s += w + ","
 }
 
 // GOOD: amortised linear
 var sb strings.Builder
 for i, w := range words {
-    if i > 0 {
-        sb.WriteByte(',')
-    }
-    sb.WriteString(w)
+	if i > 0 {
+		sb.WriteByte(',')
+	}
+	sb.WriteString(w)
 }
 result := sb.String() // no copy: Builder hands over its buffer
+fmt.Println(s, result) // go,is,fun, go,is,fun
 ```
 
 - If you already have a `[]string`, `strings.Join` is simplest and pre-sizes for you.
@@ -465,6 +493,9 @@ const (
     MB                             // 1 << 20
     GB                             // 1 << 30
 )
+
+fmt.Println(Sunday, Monday, Tuesday) // 0 1 2
+fmt.Println(KB, MB, GB)              // 1024 1048576 1073741824
 ```
 
 Enumeration advice:
@@ -487,23 +518,28 @@ hand-written loops:
 
 ```go
 xs := []int{3, 1, 2}
-slices.Sort(xs)                     // [1 2 3]
-slices.Contains(xs, 2)              // true
-slices.Index(xs, 3)                 // 2
-i, found := slices.BinarySearch(xs, 2) // 1 true (on sorted input)
-slices.Reverse(xs)                  // in place
-slices.Equal(a, b)                  // element-wise ==
-ys := slices.Clone(xs)              // independent copy
-xs = slices.Compact(xs)             // drop consecutive duplicates, in place
-slices.Concat(a, b, c)              // Go 1.22
+slices.Sort(xs)                          // [1 2 3]
+fmt.Println(xs, slices.Contains(xs, 2))  // [1 2 3] true
+fmt.Println(slices.Index(xs, 3))         // 2
+i, found := slices.BinarySearch(xs, 2)   // 1 true (on sorted input)
+fmt.Println(i, found)
+slices.Reverse(xs)                       // in place: [3 2 1]
+a, b, c := []int{1, 1}, []int{1, 1}, []int{2}
+fmt.Println(slices.Equal(a, b))          // true: element-wise ==
+ys := slices.Clone(xs)                   // independent copy
+ys = slices.Compact(slices.Concat(a, b, c)) // Concat (Go 1.22) then drop consecutive duplicates
+fmt.Println(xs, ys)                      // [3 2 1] [1 2]
 
+m := map[string]int{"b": 2, "a": 1}
 m2 := maps.Clone(m)
 keys := slices.Sorted(maps.Keys(m)) // Go 1.23 (Keys returns an iterator)
+fmt.Println(keys, len(m2))          // [a b] 2
 
-min(3, 1, 2)       // 1    built-in, any ordered type, any number of args
-max(2.5, 1)        // 2.5
-clear(m)           // map: delete every entry
-clear(xs)          // slice: zero every element; len unchanged!
+fmt.Println(min(3, 1, 2)) // 1    built-in, any ordered type, any number of args
+fmt.Println(max(2.5, 1))  // 2.5
+clear(m)                  // map: delete every entry
+clear(xs)                 // slice: zero every element; len unchanged!
+fmt.Println(m, xs)        // map[] [0 0 0]
 ```
 
 **Multi-key sorting** combines `slices.SortFunc` with `cmp.Compare` and
@@ -512,16 +548,18 @@ as "compare by this, then by that":
 
 ```go
 type WordCount struct {
-    Word  string
-    Count int
+	Word  string
+	Count int
 }
 
+wcs := []WordCount{{"go", 2}, {"is", 3}, {"fun", 2}}
 slices.SortFunc(wcs, func(a, b WordCount) int {
-    return cmp.Or(
-        cmp.Compare(b.Count, a.Count),   // count descending (note b, a)
-        strings.Compare(a.Word, b.Word), // then word ascending
-    )
+	return cmp.Or(
+		cmp.Compare(b.Count, a.Count),   // count descending (note b, a)
+		strings.Compare(a.Word, b.Word), // then word ascending
+	)
 })
+fmt.Println(wcs) // [{is 3} {fun 2} {go 2}]
 ```
 
 The comparison function returns negative / zero / positive, like C's
@@ -537,14 +575,33 @@ above, by adding a tie-breaker) or use `slices.SortStableFunc`.
 Go has one loop keyword, `for`:
 
 ```go
-for i := 0; i < n; i++ {}    // classic
-for i := range n {}          // Go 1.22+: i = 0..n-1
-for cond {}                  // while
-for {}                       // forever
-for i, v := range slice {}   // index, copy of element
-for k, v := range m {}       // random order
-for i, r := range str {}     // byte offset, rune
-for range 3 {}               // just repeat 3 times
+n, slice, m, str := 3, []string{"a", "b"}, map[string]int{"k": 1}, "hé"
+
+for i := 0; i < n; i++ { // classic
+	fmt.Print(i, " ")
+}
+for i := range n { // Go 1.22+: i = 0..n-1
+	fmt.Print(i, " ")
+}
+for n > 0 { // while
+	n--
+}
+for { // forever, until break or return
+	break
+}
+for i, v := range slice { // index, copy of element
+	fmt.Print(i, v, " ")
+}
+for k, v := range m { // random order
+	fmt.Print(k, v, " ")
+}
+for i, r := range str { // byte offset, rune: h at 0, é at 1
+	fmt.Print(i, string(r), " ")
+}
+for range 3 { // just repeat 3 times
+	fmt.Print(".")
+}
+fmt.Println()
 ```
 
 Since Go 1.22, **each iteration has its own loop variable** (when `go.mod` says
@@ -559,63 +616,136 @@ still see `v := v` lines in older code; they are now unnecessary.
 
 - **Use the zero value.**
   ```go
-  var sb strings.Builder // GOOD
-  sb := strings.Builder{} // fine, but noisier
-  sb := new(strings.Builder) // only if you need a pointer
+  var sb strings.Builder      // GOOD
+  sb2 := strings.Builder{}    // fine, but noisier
+  sb3 := new(strings.Builder) // only if you need a pointer
+  sb.WriteString("ready")
+  fmt.Println(sb.String(), sb2.Len(), sb3.Len()) // ready 0 0
   ```
 - **Preallocate when the size is known.**
   ```go
-  out := make([]T, 0, len(in))   // GOOD
-  var out []T                    // OK when the size is unknown or usually tiny
-  out := make([]T, len(in))      // BAD if you then append
+  in := []int{1, 2, 3}
+  out := make([]int, 0, len(in)) // GOOD
+  var out2 []int                 // OK when the size is unknown or usually tiny
+  out3 := make([]int, len(in))   // BAD if you then append
+  for _, v := range in {
+  	out = append(out, v)
+  	out2 = append(out2, v)
+  	out3 = append(out3, v)
+  }
+  fmt.Println(out, out2, out3) // [1 2 3] [1 2 3] [0 0 0 1 2 3]
   ```
 - **Check emptiness with `len`.**
   ```go
-  if len(s) == 0 { ... }  // GOOD: true for nil and empty
-  if s == nil { ... }     // BAD: misses []T{}
+  var s []int // nil
+  t := []int{} // empty, not nil
+  if len(s) == 0 && len(t) == 0 { // GOOD: true for nil and empty
+  	fmt.Println("both empty")
+  }
+  if t == nil { // BAD: misses []T{}
+  	fmt.Println("never printed")
+  }
   ```
 - **Cap sub-slices you hand out.**
   ```go
-  return buf[:n:n]  // GOOD: callers can't append into the rest of buf
-  return buf[:n]    // RISKY: append(result, x) overwrites buf[n]
+  func head(buf []byte, n int) []byte {
+  	return buf[:n:n] // GOOD: callers can't append into the rest of buf
+  }
+
+  func headRisky(buf []byte, n int) []byte {
+  	return buf[:n] // RISKY: append(result, x) overwrites buf[n]
+  }
+
+  buf := []byte("abcdef")
+  _ = append(head(buf, 2), 'X')
+  fmt.Println(string(buf)) // abcdef
+  _ = append(headRisky(buf, 2), 'X')
+  fmt.Println(string(buf)) // abXdef
   ```
 - **Sets are `map[K]struct{}`.**
   ```go
+  xs := []string{"a", "b", "a"}
   seen := make(map[string]struct{}, len(xs)) // GOOD
-  seen := make(map[string]int)               // BAD: the value means nothing
+  seen2 := make(map[string]int)              // BAD: the value means nothing
+  for _, x := range xs {
+  	seen[x] = struct{}{}
+  	seen2[x] = 1
+  }
+  _, ok := seen["a"]
+  fmt.Println(len(seen), ok, len(seen2)) // 2 true 2
   ```
 - **Sort before printing anything that came from a map.**
   ```go
-  for _, k := range slices.Sorted(maps.Keys(m)) { ... } // GOOD: deterministic
-  for k := range m { fmt.Println(k) }                   // BAD in tests/reports
+  m := map[string]int{"b": 2, "a": 1, "c": 3}
+  for _, k := range slices.Sorted(maps.Keys(m)) { // GOOD: deterministic
+  	fmt.Print(k, " ")
+  }
+  fmt.Println()
+  for k := range m { // BAD in tests/reports: run it a few times
+  	fmt.Print(k, " ")
+  }
+  fmt.Println()
   ```
 - **Make comparisons total.**
   ```go
-  cmp.Or(cmp.Compare(b.N, a.N), strings.Compare(a.S, b.S)) // GOOD: ties broken
-  cmp.Compare(b.N, a.N)                                     // BAD: tie order random
+  type pair struct {
+  	N int
+  	S string
+  }
+  ps := []pair{{1, "b"}, {2, "z"}, {1, "a"}}
+  slices.SortFunc(ps, func(a, b pair) int {
+  	return cmp.Or(cmp.Compare(b.N, a.N), strings.Compare(a.S, b.S)) // GOOD: ties broken
+  	// return cmp.Compare(b.N, a.N)                                  // BAD: tie order random
+  })
+  fmt.Println(ps) // [{2 z} {1 a} {1 b}]
   ```
 - **Iterate strings with `range`, measure them with `utf8`.**
   ```go
-  for _, r := range s { ... }             // GOOD: runes
-  for i := 0; i < len(s); i++ { s[i] }    // only when you truly want bytes
-  n := utf8.RuneCountInString(s)          // GOOD: characters (code points)
-  n := len(s)                             // bytes!
+  s := "héllo"
+  for _, r := range s { // GOOD: runes
+  	fmt.Print(string(r), " ")
+  }
+  fmt.Println()
+  for i := 0; i < len(s); i++ { // only when you truly want bytes
+  	fmt.Print(s[i], " ")
+  }
+  fmt.Println()
+  fmt.Println(utf8.RuneCountInString(s)) // 5   GOOD: characters (code points)
+  fmt.Println(len(s))                    // 6   bytes!
   ```
 - **Build strings with `strings.Builder` or `strings.Join`.**
   ```go
-  strings.Join(parts, ", ")  // GOOD
-  for ... { s += p + ", " }  // BAD: O(n²)
+  parts := []string{"a", "b", "c"}
+  fmt.Println(strings.Join(parts, ", ")) // GOOD
+
+  s := ""
+  for _, p := range parts { // BAD: O(n²)
+  	s += p + ", "
+  }
+  fmt.Println(s) // and it leaves a trailing ", "
   ```
 - **Compare case-insensitively with `strings.EqualFold`.**
   ```go
-  strings.EqualFold(a, b)                    // GOOD: no allocation
-  strings.ToLower(a) == strings.ToLower(b)   // BAD: two allocations
+  a, b := "Gopher", "GOPHER"
+  fmt.Println(strings.EqualFold(a, b))                  // GOOD: no allocation
+  fmt.Println(strings.ToLower(a) == strings.ToLower(b)) // BAD: two allocations
   ```
 - **Use the standard helpers.**
   ```go
-  slices.Contains(xs, x)                // GOOD
-  for _, v := range xs { if v == x ... } // BAD: noise, easy to get wrong
-  m := min(a, b)                         // GOOD (Go 1.21+)
+  xs, x := []int{1, 2, 3}, 2
+  fmt.Println(slices.Contains(xs, x)) // GOOD
+
+  found := false
+  for _, v := range xs { // BAD: noise, easy to get wrong
+  	if v == x {
+  		found = true
+  		break
+  	}
+  }
+  fmt.Println(found)
+
+  a, b := 4, 9
+  fmt.Println(min(a, b)) // GOOD (Go 1.21+)
   ```
 - **Give enums a type, and consider making the zero value "unknown".**
   ```go
@@ -624,6 +754,9 @@ still see `v := v` lines in older code; they are now unnecessary.
       ColorUnknown Color = iota
       ColorRed
   )
+
+  var c Color                              // a zero value means "unknown", not "red"
+  fmt.Println(c == ColorUnknown, ColorRed) // true 1
   ```
 
 ## Common Pitfalls

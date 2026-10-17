@@ -26,6 +26,13 @@ type Reader interface {
 type Writer interface {
     Write(p []byte) (n int, err error)
 }
+
+// Anything with the method is one; nothing to declare:
+var r Reader = strings.NewReader("hello\n")
+var w Writer = os.Stdout
+p := make([]byte, 16)
+n, _ := r.Read(p)
+w.Write(p[:n]) // hello
 ```
 
 These abstractions let you write code that works with any source or sink: files, network connections, buffers, pipes, or custom implementations. The key insight is to write functions *against the interface*, not against a concrete type like `*os.File`.
@@ -33,16 +40,27 @@ These abstractions let you write code that works with any source or sink: files,
 **Why this matters:** A function that accepts `io.Reader` can be tested with a `strings.Reader`, can be used with a file, and can be composed with other readers. A function that accepts `*os.File` can only be used with files, and is much harder to test.
 
 ```go
+import "crypto/rand"
+
 // Good: works with any reader
-func Count(r io.Reader) (int, error) { ... }
+func Count(r io.Reader) (int, error) {
+	b, err := io.ReadAll(r)
+	return len(b), err
+}
 
 // Bad: only works with files, hard to test
-func Count(f *os.File) (int, error) { ... }
+func CountFile(f *os.File) (int, error) { return Count(f) }
 
-// Usage
-Count(os.Open("data.txt"))           // works
-Count(strings.NewReader("test"))     // also works
-Count(NewCustomReader(...))          // also works
+func main() {
+	f, _ := os.CreateTemp("", "count-*.txt")
+	defer os.Remove(f.Name())
+	f.WriteString("file contents")
+	f.Seek(0, io.SeekStart)
+
+	fmt.Println(Count(f))                                // works with a file: 13 <nil>
+	fmt.Println(Count(strings.NewReader("test")))        // also works: 4 <nil>
+	fmt.Println(Count(io.LimitReader(rand.Reader, 10))) // and any other reader: 10 <nil>
+}
 ```
 
 ### Read Semantics: `n` and `err` Together
@@ -50,33 +68,58 @@ Count(NewCustomReader(...))          // also works
 One of the trickiest parts of `io.Reader` is that `Read` may return both `n > 0` **and** `err != nil` in the same call. This happens at EOF: the last chunk may be returned together with `io.EOF`. Always process the n bytes first, then look at the error.
 
 ```go
+// A reader that returns data AND io.EOF in the same call, as Read may.
+type lastChunk struct{ done bool }
+
+func (l *lastChunk) Read(p []byte) (int, error) {
+	if l.done {
+		return 0, io.EOF
+	}
+	l.done = true
+	return copy(p, "last bytes"), io.EOF
+}
+
 // Common mistake: ignoring n when err != nil
-for {
-    n, err := r.Read(p)
-    if err != nil {
-        return err // WRONG: you lose the n bytes that were read
-    }
-    process(p[:n])
+func readWrong(r io.Reader) (got []byte, err error) {
+	p := make([]byte, 64)
+	for {
+		n, err := r.Read(p)
+		if err != nil {
+			return got, err // WRONG: you lose the n bytes that were read
+		}
+		got = append(got, p[:n]...)
+	}
 }
 
 // Correct
-for {
-    n, err := r.Read(p)
-    if n > 0 {
-        process(p[:n])
-    }
-    if err != nil {
-        if err == io.EOF {
-            break
-        }
-        return err
-    }
+func readRight(r io.Reader) (got []byte, err error) {
+	p := make([]byte, 64)
+	for {
+		n, err := r.Read(p)
+		if n > 0 {
+			got = append(got, p[:n]...)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return got, nil
+			}
+			return got, err
+		}
+	}
 }
 
+wrong, _ := readWrong(&lastChunk{})
+right, _ := readRight(&lastChunk{})
+fmt.Printf("wrong: %q, right: %q\n", wrong, right) // wrong: "", right: "last bytes"
+
 // Or use helpers
-all, err := io.ReadAll(r)           // handles n/err correctly
-n, err := io.ReadFull(r, p)         // read exactly len(p) bytes or error
-n, err := io.CopyN(w, r, 42)        // read/write exactly 42 bytes
+all, err := io.ReadAll(&lastChunk{}) // handles n/err correctly
+fmt.Printf("%q %v\n", all, err)      // "last bytes" <nil>
+p := make([]byte, 4)
+n, err := io.ReadFull(strings.NewReader("abcdef"), p) // read exactly len(p) bytes or error
+fmt.Println(n, err, string(p))                         // 4 <nil> abcd
+m, err := io.CopyN(os.Stdout, strings.NewReader("0123456789"), 3) // read/write exactly 3 bytes
+fmt.Println("", m, err)                                           // 012 3 <nil>
 ```
 
 ### Composing Readers and Writers
@@ -84,48 +127,73 @@ n, err := io.CopyN(w, r, 42)        // read/write exactly 42 bytes
 The standard library provides composable building blocks:
 
 ```go
-// io.Copy copies from src to dst until src returns io.EOF
-io.Copy(dst io.Writer, src io.Reader) (int64, error)
+// io.Copy copies from src to dst until src returns io.EOF:
+//
+//	func Copy(dst Writer, src Reader) (written int64, err error)
+n, err := io.Copy(os.Stdout, strings.NewReader("copied\n"))
+fmt.Println(n, err) // 7 <nil>
 
 // io.MultiReader concatenates several readers
-multi := io.MultiReader(reader1, reader2, reader3)
-io.Copy(os.Stdout, multi)
+multiR := io.MultiReader(strings.NewReader("one "), strings.NewReader("two "), strings.NewReader("three\n"))
+io.Copy(os.Stdout, multiR) // one two three
 
 // io.MultiWriter broadcasts writes to multiple writers
-multi := io.MultiWriter(file1, file2, os.Stdout)
-fmt.Fprintf(multi, "goes to all three")
+var buf1, buf2 bytes.Buffer
+multiW := io.MultiWriter(&buf1, &buf2, os.Stdout)
+fmt.Fprintf(multiW, "goes to all three\n")
+fmt.Println(buf1.Len(), buf2.Len()) // 18 18
 
 // io.TeeReader reads from src, writes to dst, and returns a reader
 // that gives you the same bytes that were written to dst
-tee := io.TeeReader(src, dst)
-data, _ := io.ReadAll(tee)  // data == what was written to dst
+var dst bytes.Buffer
+tee := io.TeeReader(strings.NewReader("teed"), &dst)
+data, _ := io.ReadAll(tee) // data == what was written to dst
+fmt.Println(string(data), dst.String()) // teed teed
 
 // io.LimitReader returns a reader that stops after n bytes
-limited := io.LimitReader(src, 1024)  // read at most 1024 bytes
+limited := io.LimitReader(strings.NewReader("0123456789"), 4) // read at most 4 bytes
+data, _ = io.ReadAll(limited)
+fmt.Println(string(data)) // 0123
 
-// io.SectionReader reads from a reader at a given offset and length
-section := io.NewSectionReader(f, offset, length)
+// io.NewSectionReader reads a window of an io.ReaderAt (a file, a
+// strings.Reader): here 5 bytes starting at offset 6
+section := io.NewSectionReader(strings.NewReader("hello, world"), 6, 5)
+data, _ = io.ReadAll(section)
+fmt.Printf("%q\n", data) // " worl"
 ```
 
 These compose to build powerful pipelines with minimal copying:
 
 ```go
+dir, _ := os.MkdirTemp("", "tee")
+defer os.RemoveAll(dir)
+name := filepath.Join(dir, "data.txt")
+os.WriteFile(name, []byte(strings.Repeat("compress me ", 1000)), 0o644)
+
 // Compress a file, write both the original and compressed to separate files
-src, _ := os.Open("data.txt")
+src, err := os.Open(name)
+if err != nil {
+	log.Fatal(err)
+}
 defer src.Close()
 
-orig, _ := os.Create("data.txt.orig")
+orig, _ := os.Create(name + ".orig")
 defer orig.Close()
 
-gzipped, _ := os.Create("data.txt.gz")
+gzipped, _ := os.Create(name + ".gz")
 defer gzipped.Close()
 
 // Use TeeReader to observe the data flow, then compress
 tee := io.TeeReader(src, orig)
 gz := gzip.NewWriter(gzipped)
-defer gz.Close()
 
-io.Copy(gz, tee)  // reads from src, writes to both orig and gzipped
+n, err := io.Copy(gz, tee) // reads from src, writes to both orig and gzipped
+if err := gz.Close(); err != nil { // Close flushes the last compressed block
+	log.Fatal(err)
+}
+o, _ := orig.Stat()
+g, _ := gzipped.Stat()
+fmt.Println(n, err, o.Size(), g.Size()) // 12000 <nil> 12000, and far fewer bytes compressed
 ```
 
 ### Buffered I/O with bufio
@@ -137,13 +205,14 @@ For character-at-a-time or line-at-a-time reading, the `bufio` package provides 
 `Scanner` reads lines or other tokens without holding the entire input in memory. It handles line ending conversion and raises an error if a line exceeds `bufio.MaxScanTokenSize` (64 KiB).
 
 ```go
+r := strings.NewReader("first line\nsecond line\nno newline at the end")
 sc := bufio.NewScanner(r)
 for sc.Scan() {
-    line := sc.Text()  // a string, without the newline
-    // process line
+	line := sc.Text() // a string, without the newline
+	fmt.Printf("%q\n", line)
 }
 if err := sc.Err(); err != nil {
-    return err  // NEVER skip this check
+	log.Fatal(err) // NEVER skip this check
 }
 ```
 
@@ -151,16 +220,30 @@ The 64 KiB limit is intentional: it prevents memory exhaustion on malformed inpu
 
 1. Raise the limit with `sc.Buffer`:
    ```go
-   sc := bufio.NewScanner(r)
-   sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)  // max 10 MiB per line
+   long := strings.Repeat("x", 100_000) // one 100 KB line: over the default 64 KiB limit
+   sc := bufio.NewScanner(strings.NewReader(long))
+   for sc.Scan() {
+   }
+   fmt.Println(sc.Err()) // bufio.Scanner: token too long
+
+   sc = bufio.NewScanner(strings.NewReader(long))
+   sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // max 10 MiB per line
+   for sc.Scan() {
+   	fmt.Println(len(sc.Text())) // 100000
+   }
+   fmt.Println(sc.Err()) // <nil>
    ```
 
 2. Use `bufio.Reader.ReadLine` instead, which is more flexible:
    ```go
-   br := bufio.NewReader(r)
+   long := strings.Repeat("x", 40) + "\nshort\n"
+   br := bufio.NewReaderSize(strings.NewReader(long), 16) // tiny buffer to force splits
    for {
-       chunk, isPrefix, err := br.ReadLine()  // true means the line continues
-       // ...
+   	chunk, isPrefix, err := br.ReadLine() // isPrefix true means the line continues
+   	if err != nil {
+   		break // io.EOF
+   	}
+   	fmt.Printf("%q isPrefix=%v\n", chunk, isPrefix)
    }
    ```
 
@@ -171,11 +254,20 @@ The 64 KiB limit is intentional: it prevents memory exhaustion on malformed inpu
 A `Writer` buffers writes for efficiency. You must call `Flush` before closing to ensure all data is written.
 
 ```go
+f, err := os.CreateTemp("", "buffered-*.txt")
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(f.Name())
+defer f.Close()
+
 w := bufio.NewWriter(f)
 fmt.Fprintf(w, "buffered output\n")
 if err := w.Flush(); err != nil {
-    return err
+	log.Fatal(err)
 }
+data, _ := os.ReadFile(f.Name())
+fmt.Printf("%q\n", data) // "buffered output\n"
 ```
 
 In a CLI, remember that `os.Exit` does not run defers, so buffered output is lost if you exit without flushing.
@@ -187,15 +279,20 @@ In a CLI, remember that `os.Exit` does not run defers, so buffered output is los
 For small or bounded files, `os.ReadFile` and `os.WriteFile` are simple and safe:
 
 ```go
-data, err := os.ReadFile("config.json")
+dir, _ := os.MkdirTemp("", "readfile")
+defer os.RemoveAll(dir)
+os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"debug": true}`), 0o644)
+
+data, err := os.ReadFile(filepath.Join(dir, "config.json"))
 if err != nil {
-    return err
+	log.Fatal(err)
 }
 
-err = os.WriteFile("output.txt", data, 0o644)
+err = os.WriteFile(filepath.Join(dir, "output.txt"), data, 0o644)
 if err != nil {
-    return err
+	log.Fatal(err)
 }
+fmt.Printf("copied %d bytes: %s\n", len(data), data)
 ```
 
 #### Streaming and Cleanup
@@ -204,40 +301,57 @@ For large or untrusted input, stream with `io.Reader`/`io.Writer`. Always close 
 
 ```go
 // For reading: Close error is usually safe to ignore
-f, err := os.Open("data.txt")
-if err != nil {
-    return err
+func firstByte(path string) (byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	b := make([]byte, 1)
+	_, err = f.Read(b)
+	return b[0], err
 }
-defer f.Close()
-// ... use f ...
 
 // For writing: Close error can hide data loss. Check it.
 func write(path string, data []byte) (err error) {
-    f, err := os.Create(path)
-    if err != nil {
-        return err
-    }
-    defer func() {
-        if cerr := f.Close(); cerr != nil && err == nil {
-            err = cerr
-        }
-    }()
-    
-    w := bufio.NewWriter(f)
-    if _, err := w.Write(data); err != nil {
-        return err
-    }
-    return w.Flush()
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+
+	w := bufio.NewWriter(f)
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	return w.Flush()
 }
+
+path := filepath.Join(os.TempDir(), "close-demo.txt")
+defer os.Remove(path)
+fmt.Println(write(path, []byte("hello"))) // <nil>
+b, err := firstByte(path)
+fmt.Printf("%c %v\n", b, err) // h <nil>
 ```
 
 For atomic replacements (preventing partial writes on crash), write to a temp file first, then rename:
 
 ```go
-f, _ := ioutil.TempFile(dir, "tmp-")
-// write to f
+dir, _ := os.MkdirTemp("", "atomic")
+defer os.RemoveAll(dir)
+finalPath := filepath.Join(dir, "config.json")
+
+f, _ := os.CreateTemp(dir, "tmp-") // same directory, so Rename stays on one filesystem
+f.WriteString(`{"version": 2}`)
 f.Close()
-os.Rename(f.Name(), finalPath)
+os.Rename(f.Name(), finalPath) // readers see the old file or the new one, never half of it
+
+data, _ := os.ReadFile(finalPath)
+fmt.Println(string(data))
 ```
 
 #### Protecting Against Resource Exhaustion
@@ -245,15 +359,23 @@ os.Rename(f.Name(), finalPath)
 When accepting untrusted input, limit its size:
 
 ```go
+r := strings.NewReader(strings.Repeat("a", 5_000_000)) // pretend: untrusted, possibly huge
+
 // Bad: io.ReadAll on untrusted input can exhaust memory
-data, _ := io.ReadAll(r)
+// data, _ := io.ReadAll(r)
 
 // Good: limit to 1 MiB
 limited := io.LimitReader(r, 1024*1024)
 data, _ := io.ReadAll(limited)
+fmt.Println(len(data)) // 1048576
 
 // For HTTP request bodies, http.MaxBytesReader is built-in
-r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+	_, err := io.ReadAll(r.Body)
+	fmt.Println(err) // http: request body too large
+})
+h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/", strings.NewReader(strings.Repeat("a", 2_000_000))))
 ```
 
 ### Walking Directory Trees
@@ -261,16 +383,24 @@ r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
 The `filepath` package provides `WalkDir` for traversing directories without excessive allocations:
 
 ```go
-err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
-    if err != nil {
-        return err  // permission denied, etc.
-    }
-    if d.IsDir() {
-        return nil  // skip into directories
-    }
-    fmt.Println(path)
-    return nil
+dir, _ := os.MkdirTemp("", "walk")
+defer os.RemoveAll(dir)
+os.MkdirAll(filepath.Join(dir, "a", "b"), 0o755)
+os.WriteFile(filepath.Join(dir, "a", "one.txt"), nil, 0o644)
+os.WriteFile(filepath.Join(dir, "a", "b", "two.txt"), nil, 0o644)
+
+err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	if err != nil {
+		return err // permission denied, etc.
+	}
+	if d.IsDir() {
+		return nil // keep walking; print only files
+	}
+	rel, _ := filepath.Rel(dir, path)
+	fmt.Println(rel)
+	return nil
 })
+fmt.Println(err) // a/b/two.txt, a/one.txt (lexical order), then <nil>
 ```
 
 Use `WalkDir`, not the older `Walk`: it's more efficient because `DirEntry` caches stat info.
@@ -282,27 +412,35 @@ The `csv` package reads and writes CSV with proper quoting and escape handling:
 ```go
 import "encoding/csv"
 
-// Reading
-r := csv.NewReader(f)
-r.FieldsPerRecord = 3  // enforce 3 fields per row, or -1 for variable
-for {
-    record, err := r.Read()  // []string, one per field
-    if err == io.EOF {
-        break
-    }
-    if err != nil {
-        return err  // *csv.ParseError has Line and Column fields
-    }
-    process(record)
+func readCSV(f io.Reader) error {
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = 2 // enforce 2 fields per row, or -1 for variable
+	for {
+		record, err := r.Read() // []string, one per field
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err // *csv.ParseError has Line and Column fields
+		}
+		fmt.Printf("%q\n", record)
+	}
+	return nil
 }
 
-// Writing
-w := csv.NewWriter(os.Stdout)
-w.Write([]string{"name", "age"})
-w.Write([]string{"Alice", "31"})
-w.Flush()  // MUST flush before closing
-if err := w.Error(); err != nil {
-    return err
+func main() {
+	// Reading
+	err := readCSV(strings.NewReader("name,age\n\"Lovelace, Ada\",36\nBob\n"))
+	fmt.Println(err) // record on line 3: wrong number of fields
+
+	// Writing
+	w := csv.NewWriter(os.Stdout)
+	w.Write([]string{"name", "age"})
+	w.Write([]string{"Alice, Jr.", "31"}) // quoted automatically
+	w.Flush()                            // MUST flush before closing
+	if err := w.Error(); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
@@ -330,26 +468,39 @@ type User struct {
     Internal string    `json:"-"`                      // always omit
     Balance  float64   `json:"balance,string"`         // read/write as JSON string
 }
+
+out, _ := json.Marshal(User{ID: 1, Name: "Ada", Internal: "secret", Balance: 9.5})
+fmt.Println(string(out)) // {"id":1,"name":"Ada","balance":"9.5"}: no email, created or internal
 ```
 
-Fields without a tag use their struct name (case-sensitive). Unexported fields are always ignored.
+Fields without a tag use their struct name. When decoding, keys match field names case-insensitively, so `"NAME"` fills `Name`. Unexported fields are always ignored.
 
 #### Unmarshaling
 
 `json.Unmarshal` is for data you already have as `[]byte`. `json.NewDecoder(r).Decode(&v)` is for streams:
 
 ```go
+type User struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
 // Whole buffer
 var u User
-err := json.Unmarshal(data, &u)
+err := json.Unmarshal([]byte(`{"id": 1, "name": "Ada"}`), &u)
+fmt.Println(u, err) // {1 Ada} <nil>
 
 // Stream (e.g., HTTP body, file)
-dec := json.NewDecoder(f)
-dec.DisallowUnknownFields()  // reject unknown keys
-err := dec.Decode(&u)
+dec := json.NewDecoder(strings.NewReader(`{"id": 2, "name": "Bob", "admin": true}`))
+dec.DisallowUnknownFields() // reject unknown keys
+err = dec.Decode(&u)
+fmt.Println(err) // json: unknown field "admin"
+
 // To reject trailing junk after the first object:
+dec = json.NewDecoder(strings.NewReader(`{"id": 3} {"id": 4}`))
+dec.Decode(&u)
 if dec.More() {
-    return errors.New("unexpected trailing data")
+	fmt.Println(errors.New("unexpected trailing data"))
 }
 ```
 
@@ -366,23 +517,34 @@ if dec.More() {
 For newline-delimited JSON (NDJSON), decode in a loop:
 
 ```go
+type Event struct {
+	Type string `json:"type"`
+	N    int    `json:"n"`
+}
+
+// A stream of JSON objects, one after another (JSON Lines, for example)
+f := strings.NewReader(`{"type": "click", "n": 1}
+{"type": "view", "n": 7}
+{"type": "click", "n": 2}`)
+
 dec := json.NewDecoder(f)
 for dec.More() {
-    var obj MyType
-    if err := dec.Decode(&obj); err != nil {
-        return err
-    }
-    process(obj)
+	var obj Event
+	if err := dec.Decode(&obj); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%+v\n", obj)
 }
 ```
 
 For writing JSON:
 
 ```go
+items := []map[string]any{{"id": 1, "tags": []string{"a"}}, {"id": 2}}
 enc := json.NewEncoder(os.Stdout)
-enc.SetIndent("", "  ")  // pretty-print
+enc.SetIndent("", "  ") // pretty-print
 for _, item := range items {
-    enc.Encode(item)  // appends newline
+	enc.Encode(item) // appends newline
 }
 ```
 
@@ -391,25 +553,39 @@ for _, item := range items {
 Implement `json.Marshaler` and `json.Unmarshaler` for custom encoding:
 
 ```go
+type User struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
 func (u User) MarshalJSON() ([]byte, error) {
-    // return custom JSON bytes
-    return json.Marshal(map[string]interface{}{
-        "id": u.ID,
-        "name": strings.ToUpper(u.Name),
-    })
+	// return custom JSON bytes
+	return json.Marshal(map[string]any{
+		"id":   u.ID,
+		"name": strings.ToUpper(u.Name),
+	})
 }
 
 func (u *User) UnmarshalJSON(b []byte) error {
-    type Alias User
-    var aux struct {
-        *Alias
-        Name string `json:"name"` // uppercase before use
-    }
-    if err := json.Unmarshal(b, &aux); err != nil {
-        return err
-    }
-    u.Name = strings.ToLower(aux.Name)
-    return nil
+	type Alias User // same fields, but none of User's methods: no infinite recursion
+	aux := struct {
+		*Alias
+		Name string `json:"name"` // shadows Alias.Name so we can transform it
+	}{Alias: (*Alias)(u)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	u.Name = strings.ToLower(aux.Name)
+	return nil
+}
+
+func main() {
+	out, _ := json.Marshal(User{ID: 7, Name: "ada"})
+	fmt.Println(string(out)) // {"id":7,"name":"ADA"}
+
+	var u User
+	err := json.Unmarshal(out, &u)
+	fmt.Println(u, err) // {7 ada} <nil>
 }
 ```
 
@@ -418,12 +594,21 @@ func (u *User) UnmarshalJSON(b []byte) error {
 Go 1.24 adds `os.Root` to confine file operations to a single directory, preventing path traversal attacks when handling user-supplied paths:
 
 ```go
-root, err := os.OpenRoot("/var/app/data")
+dir, _ := os.MkdirTemp("", "root-demo") // stands in for /var/app/data
+defer os.RemoveAll(dir)
+
+root, err := os.OpenRoot(dir)
+if err != nil {
+	log.Fatal(err)
+}
 defer root.Close()
 
-f, err := root.Create("output.txt")  // creates /var/app/data/output.txt
+f, err := root.Create("output.txt") // creates <dir>/output.txt
+fmt.Println(err)                    // <nil>
+f.Close()
 
-f, err := root.Open("../../etc/passwd")  // error: "path escapes from parent"
+_, err = root.Open("../../etc/passwd") // error: path escapes from parent
+fmt.Println(err)
 ```
 
 ## Idioms & Best Practices

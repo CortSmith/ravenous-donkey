@@ -55,15 +55,23 @@ Fields are separated by whitespace.
 
 **Result type:**
 ```go
-type Result struct {
-    Applied  int          // successful transactions
-    Failures []*LineError // one per failed transaction
-}
+// Runs YOUR ledger package. The types are already in process.go:
+//
+//	type Result struct {
+//		Applied  int          // successful transactions
+//		Failures []*LineError // one per failed transaction
+//	}
+//
+// LineError has Line (1-based) and Err (the cause: a syntax error or an
+// *AccountError), with Error() and Unwrap(). Result.Err() returns
+// errors.Join of all failures, or nil if there are none.
+import "gocourse/modules/02-errors/project/ledger"
 
-// LineError has Line (1-based), Err (the cause: syntax error or *AccountError).
-// Implement Error() and Unwrap().
-
-// Result.Err() returns errors.Join of all failures, or nil if none.
+input := "open alice 100\nwithdraw alice 500\nfly bob\ndeposit alice 5\n"
+res, err := ledger.New().Process(strings.NewReader(input))
+fmt.Println("applied:", res.Applied, "failures:", len(res.Failures), "read error:", err)
+fmt.Println(res.Err())
+// When you're done: applied: 2 failures: 2, then one line per failure.
 ```
 
 If reading the input fails (e.g., I/O error), return the read error wrapped in context (e.g., `"read transactions: ..."`) and the Result with what was processed so far.

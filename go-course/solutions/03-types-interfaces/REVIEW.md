@@ -15,6 +15,13 @@ This document contains reference solutions, optimization notes, and grading chec
 ### Readable Solution
 
 ```go
+import "gocourse/solutions/03-types-interfaces/exercises/shapes"
+
+// Shape and ErrInvalidTriangle, from shapes.go:
+type Shape = shapes.Shape
+
+var ErrInvalidTriangle = shapes.ErrInvalidTriangle
+
 // All three types (Circle, Rect, Triangle) implement Shape with value receivers
 // because they are immutable and small.
 
@@ -102,6 +109,17 @@ var (
 	_ fmt.Stringer = Rect{}
 	_ fmt.Stringer = Triangle{}
 )
+
+func main() {
+	tri, err := NewTriangle(3, 4, 5)
+	fmt.Println(tri, err) // Triangle(3, 4, 5) <nil>
+	all := []Shape{Circle{Radius: 1}, Rect{Width: 2, Height: 3}, tri}
+	SortByArea(all)
+	big, _ := Largest(all)
+	fmt.Printf("%v total=%.2f largest=%v\n", all, TotalArea(all), big)
+	_, err = NewTriangle(1, 1, 5)
+	fmt.Println(err) // triangle inequality violation: invalid triangle
+}
 ```
 
 ### Optimized Solution
@@ -202,6 +220,13 @@ func (s *Stack) Clone() *Stack {
 func (s *Stack) String() string {
 	return fmt.Sprintf("Stack%v", s.items)
 }
+
+var s Stack // the zero value works
+s.Push(1)
+s.Push(2)
+c := s.Clone()
+v, _ := s.Pop()
+fmt.Println(v, s.String(), c.String(), s.Len()) // 2 Stack[1] Stack[1 2] 1
 ```
 
 ### Optimized Solution
@@ -209,6 +234,8 @@ func (s *Stack) String() string {
 The readable solution is already very efficient. One minor alternative for `String()` uses a strings.Builder to avoid the allocation from `fmt.Sprintf`, but for a small slice it's unlikely to matter:
 
 ```go
+type Stack struct{ items []int }
+
 // Micro-optimization: avoid fmt.Sprintf allocation
 func (s *Stack) String() string {
 	var sb strings.Builder
@@ -221,6 +248,10 @@ func (s *Stack) String() string {
 	}
 	sb.WriteByte(']')
 	return sb.String()
+}
+
+func main() {
+	fmt.Println(&Stack{items: []int{1, 2, 3}}) // Stack[1 2 3]
 }
 ```
 
@@ -338,6 +369,13 @@ func Validate(n int) error {
 	}
 	return nil // untyped nil, not (*ValidationError)(nil)
 }
+
+fmt.Println(Describe(nil))
+fmt.Println(Describe(errors.New("boom")))
+fmt.Println(Describe(time.Second))
+fmt.Println(Describe(uint8(7)))
+fmt.Println(Describe([]any{"a", 1.5, map[string]any{"z": true, "a": nil}}))
+fmt.Println(Validate(50) == nil, Validate(-1)) // true invalid value -1: negative
 ```
 
 ### Optimized Solution
@@ -427,6 +465,9 @@ func (a Animal) Speak() string {
 	a.Log(msg) // promoted method
 	return msg
 }
+
+a := Animal{Logger: Logger{prefix: "[zoo] "}, Name: "Rex", Sound: "woof"}
+a.Speak() // [zoo] Rex says woof
 ```
 
 ### Optimized Solution
@@ -467,6 +508,18 @@ Embedding is cleaner than composition for this use case because `Log` is promote
 ### Readable Solution
 
 ```go
+import "gocourse/solutions/03-types-interfaces/exercises/server"
+
+// The defaults and the sentinel, from server.go:
+const (
+	DefaultPort         = server.DefaultPort
+	DefaultReadTimeout  = server.DefaultReadTimeout
+	DefaultWriteTimeout = server.DefaultWriteTimeout
+	DefaultMaxConns     = server.DefaultMaxConns
+)
+
+var ErrInvalidOption = server.ErrInvalidOption
+
 type Server struct {
 	host         string
 	port         int
@@ -557,6 +610,13 @@ func (s *Server) String() string {
 	addr := s.Addr()
 	return fmt.Sprintf("%s://%s (read %v, write %v, max %d conns)", scheme, addr, s.readTimeout, s.writeTimeout, s.maxConns)
 }
+
+func main() {
+	s, err := New("localhost", WithPort(9000), WithTLS("cert.pem", "key.pem"))
+	fmt.Println(s, err) // https://localhost:9000 (read 5s, write 10s, max 100 conns) <nil>
+	_, err = New("localhost", WithMaxConns(0))
+	fmt.Println(err, errors.Is(err, ErrInvalidOption))
+}
 ```
 
 ### Optimized Solution
@@ -619,6 +679,10 @@ See the solution files for the complete implementation. Below are key design poi
 #### Product Type (Readable)
 
 ```go
+import inventory "gocourse/solutions/03-types-interfaces/project"
+
+var ErrInvalid = inventory.ErrInvalid
+
 type Product struct {
 	SKU          string
 	Name         string
@@ -662,11 +726,26 @@ func FormatCents(cents int64) string {
 	fraction := cents % 100
 	return fmt.Sprintf("$%d.%02d", dollars, fraction)
 }
+
+func main() {
+	p := Product{SKU: "A-1", Name: "Widget", PriceCents: 199, Quantity: 10, ReorderLevel: 2}
+	fmt.Println(p, p.Validate(), FormatCents(p.Value())) // A-1 "Widget" qty=10 @ $1.99 <nil> $19.90
+	fmt.Println(Product{SKU: "B-2"}.Validate())          // name: invalid product
+}
 ```
 
 #### Store Interface and MemoryStore (Readable)
 
 ```go
+import inventory "gocourse/solutions/03-types-interfaces/project"
+
+type Product = inventory.Product
+
+var (
+	ErrDuplicate = inventory.ErrDuplicate
+	ErrNotFound  = inventory.ErrNotFound
+)
+
 type Store interface {
 	Add(p Product) error
 	Get(sku string) (Product, error)
@@ -737,11 +816,32 @@ func (m *MemoryStore) List() []Product {
 	}
 	return result
 }
+
+func main() {
+	s := NewMemoryStore()
+	s.Add(Product{SKU: "B-2", Name: "Gadget"})
+	s.Add(Product{SKU: "A-1", Name: "Widget"})
+	fmt.Println(s.Add(Product{SKU: "A-1"})) // sku A-1: product already exists
+	fmt.Println(s.List())                   // sorted by SKU
+}
 ```
 
 #### Inventory Type (Readable)
 
 ```go
+import inventory "gocourse/solutions/03-types-interfaces/project"
+
+type (
+	Product = inventory.Product
+	Store   = inventory.Store
+	Alerter = inventory.Alerter
+)
+
+var (
+	ErrInvalid           = inventory.ErrInvalid
+	ErrInsufficientStock = inventory.ErrInsufficientStock
+)
+
 type Inventory struct {
 	mu      sync.Mutex // guards the sequence of Get-Update operations
 	store   Store
@@ -758,7 +858,7 @@ func (inv *Inventory) Sell(sku string, qty int) error {
 	}
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	
+
 	p, err := inv.store.Get(sku)
 	if err != nil {
 		return err
@@ -766,89 +866,184 @@ func (inv *Inventory) Sell(sku string, qty int) error {
 	if p.Quantity < qty {
 		return fmt.Errorf("sku %s: %w", sku, ErrInsufficientStock)
 	}
-	
+
 	wasLowStock := p.LowStock()
 	p.Quantity -= qty
-	
+
 	if err := inv.store.Update(p); err != nil {
 		return err
 	}
-	
+
 	if !wasLowStock && p.LowStock() && inv.alerter != nil {
 		inv.alerter.LowStock(p)
 	}
 	return nil
+}
+
+func main() {
+	store := inventory.NewMemoryStore()
+	store.Add(Product{SKU: "A-1", Name: "Widget", Quantity: 5, ReorderLevel: 2})
+	inv := New(store, inventory.AlerterFunc(func(p Product) { fmt.Println("ALERT low stock:", p.SKU) }))
+	fmt.Println(inv.Sell("A-1", 2)) // <nil>
+	fmt.Println(inv.Sell("A-1", 1)) // ALERT low stock: A-1, then <nil>
+	fmt.Println(inv.Sell("A-1", 9)) // sku A-1: insufficient stock
 }
 ```
 
 #### Sorting and Reporting (Readable)
 
 ```go
-func (inv *Inventory) Sorted(key SortKey) ([]Product, error) {
-	products := inv.store.List()
-	switch key {
-	case BySKU:
-		// already sorted by List()
-	case ByName:
-		slices.SortStableFunc(products, func(a, b Product) int {
-			if cmp := cmp.Compare(a.Name, b.Name); cmp != 0 {
-				return cmp
-			}
-			return cmp.Compare(a.SKU, b.SKU)
-		})
-	case ByValue:
-		slices.SortStableFunc(products, func(a, b Product) int {
-			// descending value
-			if cmp := -cmp.Compare(a.Value(), b.Value()); cmp != 0 {
-				return cmp
-			}
-			return cmp.Compare(a.SKU, b.SKU)
-		})
-	case ByQuantity:
-		slices.SortStableFunc(products, func(a, b Product) int {
-			if cmp := cmp.Compare(a.Quantity, b.Quantity); cmp != 0 {
-				return cmp
-			}
-			return cmp.Compare(a.SKU, b.SKU)
-		})
-	default:
-		return nil, fmt.Errorf("sort key: %w", ErrInvalid)
+import inventory "gocourse/solutions/03-types-interfaces/project"
+
+// The rest of the package, from product.go and store.go:
+type (
+	Product = inventory.Product
+	Store   = inventory.Store
+)
+
+var (
+	ErrInvalid  = inventory.ErrInvalid
+	FormatCents = inventory.FormatCents
+)
+
+type Inventory struct{ store Store }
+
+func (inv *Inventory) LowStock() []Product {
+	var low []Product
+	for _, p := range inv.store.List() {
+		if p.LowStock() {
+			low = append(low, p)
+		}
 	}
-	return products, nil
+	return low
 }
 
+// SortKey selects the order used by Sorted and WriteReport.
+type SortKey int
+
+// Sort orders. Every order breaks ties by ascending SKU so output is
+// deterministic.
+const (
+	BySKU      SortKey = iota // ascending SKU
+	ByName                    // ascending Name
+	ByValue                   // descending Value()
+	ByQuantity                // ascending Quantity
+)
+
+// String returns the lower-case name of the key ("sku", "name", "value",
+// "quantity") or "SortKey(N)" for unknown values.
+func (k SortKey) String() string {
+	switch k {
+	case BySKU:
+		return "sku"
+	case ByName:
+		return "name"
+	case ByValue:
+		return "value"
+	case ByQuantity:
+		return "quantity"
+	}
+	return fmt.Sprintf("SortKey(%d)", int(k))
+}
+
+// compare returns the comparison function for k, or nil for unknown keys.
+func (k SortKey) compare() func(a, b Product) int {
+	switch k {
+	case BySKU:
+		return func(a, b Product) int { return cmp.Compare(a.SKU, b.SKU) }
+	case ByName:
+		return func(a, b Product) int {
+			return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.SKU, b.SKU))
+		}
+	case ByValue:
+		return func(a, b Product) int {
+			return cmp.Or(cmp.Compare(b.Value(), a.Value()), cmp.Compare(a.SKU, b.SKU))
+		}
+	case ByQuantity:
+		return func(a, b Product) int {
+			return cmp.Or(cmp.Compare(a.Quantity, b.Quantity), cmp.Compare(a.SKU, b.SKU))
+		}
+	}
+	return nil
+}
+
+// Sorted returns all products in the order given by key. Unknown keys
+// return an error wrapping ErrInvalid.
+func (inv *Inventory) Sorted(key SortKey) ([]Product, error) {
+	compare := key.compare()
+	if compare == nil {
+		return nil, fmt.Errorf("unknown sort key %v: %w", key, ErrInvalid)
+	}
+	ps := inv.store.List()
+	slices.SortFunc(ps, compare)
+	return ps, nil
+}
+
+// reportLine is the format shared by the header, rows and total line.
+const reportLine = "%-8s %-20s %5s %10s %12s\n"
+
+// WriteReport writes a fixed-width stock report to w, ordered by key:
+//
+//	SKU      NAME                   QTY      PRICE        VALUE
+//	A-1      Widget                  10      $1.99       $19.90
+//	TOTAL                            10                  $19.90
+//	low stock: none
+//
+// Every line uses the format "%-8s %-20s %5s %10s %12s\n". Rows contain
+// SKU, Name, Quantity, FormatCents(PriceCents) and FormatCents(Value()); the
+// TOTAL line has the total quantity and total value with empty NAME and
+// PRICE columns. The last line is "low stock: " followed by the low-stock
+// SKUs in ascending order joined by ", ", or "none". Long values are not
+// truncated. The first write error (if any) is returned.
 func (inv *Inventory) WriteReport(w io.Writer, key SortKey) error {
-	products, err := inv.Sorted(key)
+	ps, err := inv.Sorted(key)
 	if err != nil {
 		return err
 	}
-	
-	totalQty := 0
-	totalValue := int64(0)
-	
-	fmt.Fprintf(w, "%-8s %-20s %5s %10s %12s\n", "SKU", "NAME", "QTY", "PRICE", "VALUE")
-	for _, p := range products {
-		fmt.Fprintf(w, "%-8s %-20s %5d %10s %12s\n",
-			p.SKU, p.Name, p.Quantity, FormatCents(p.PriceCents), FormatCents(p.Value()))
+	ew := &errWriter{w: w}
+	ew.printf(reportLine, "SKU", "NAME", "QTY", "PRICE", "VALUE")
+	var totalQty int
+	var totalValue int64
+	var low []string
+	for _, p := range ps {
+		ew.printf(reportLine, p.SKU, p.Name, fmt.Sprint(p.Quantity), FormatCents(p.PriceCents), FormatCents(p.Value()))
 		totalQty += p.Quantity
 		totalValue += p.Value()
-	}
-	
-	fmt.Fprintf(w, "%-8s %-20s %5d %10s %12s\n",
-		"TOTAL", "", totalQty, "", FormatCents(totalValue))
-	
-	lowStockSKUs := inv.LowStock()
-	if len(lowStockSKUs) == 0 {
-		fmt.Fprintf(w, "low stock: none\n")
-	} else {
-		skus := make([]string, len(lowStockSKUs))
-		for i, p := range lowStockSKUs {
-			skus[i] = p.SKU
+		if p.LowStock() {
+			low = append(low, p.SKU)
 		}
-		fmt.Fprintf(w, "low stock: %s\n", strings.Join(skus, ", "))
 	}
-	
-	return nil
+	ew.printf(reportLine, "TOTAL", "", fmt.Sprint(totalQty), "", FormatCents(totalValue))
+	slices.Sort(low) // rows may be in another order
+	lowStr := "none"
+	if len(low) > 0 {
+		lowStr = strings.Join(low, ", ")
+	}
+	ew.printf("low stock: %s\n", lowStr)
+	return ew.err
+}
+
+// errWriter remembers the first write error and turns later writes into
+// no-ops, so the report code can stay linear (see "Errors are values",
+// https://go.dev/blog/errors-are-values).
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) printf(format string, args ...any) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintf(ew.w, format, args...)
+}
+
+func main() {
+	s := inventory.NewMemoryStore()
+	s.Add(Product{SKU: "A-1", Name: "Widget", PriceCents: 199, Quantity: 10, ReorderLevel: 2})
+	s.Add(Product{SKU: "B-2", Name: "Gadget", PriceCents: 1250, Quantity: 1, ReorderLevel: 3})
+	inv := &Inventory{store: s}
+	fmt.Println(inv.WriteReport(os.Stdout, ByValue))
 }
 ```
 
@@ -858,34 +1053,97 @@ A performance-optimized version might:
 
 1. **Avoid allocations in List()** by using a preallocated slice:
    ```go
+   import inventory "gocourse/solutions/03-types-interfaces/project"
+
+   type Product = inventory.Product
+
+   type MemoryStore struct {
+   	mu       sync.Mutex
+   	products map[string]Product
+   }
+
    func (m *MemoryStore) List() []Product {
-       m.mu.Lock()
-       defer m.mu.Unlock()
-       result := make([]Product, 0, len(m.products))
-       for _, sku := range slices.Collect(maps.Keys(m.products)) {
-           result = append(result, m.products[sku])
-       }
-       slices.Sort(result) // would need custom less func or define a type
-       return result
+   	m.mu.Lock()
+   	defer m.mu.Unlock()
+   	result := make([]Product, 0, len(m.products)) // one allocation
+   	for _, p := range m.products {
+   		result = append(result, p)
+   	}
+   	slices.SortFunc(result, func(a, b Product) int { return cmp.Compare(a.SKU, b.SKU) })
+   	return result
+   }
+
+   func main() {
+   	m := &MemoryStore{products: map[string]Product{"B": {SKU: "B"}, "A": {SKU: "A"}}}
+   	for _, p := range m.List() {
+   		fmt.Print(p.SKU, " ") // A B
+   	}
+   	fmt.Println()
    }
    ```
-   But since we can't sort Products directly, this doesn't help.
+   It saves the separate key slice, but `List` still sorts on every call.
 
 2. **Cache sorted keys in MemoryStore** to avoid repeated sorting:
    ```go
+   type Product struct{ SKU string }
+
    type MemoryStore struct {
-       mu         sync.Mutex
-       products   map[string]Product
-       sortedSKUs []string // cached sorted list of keys
+   	mu         sync.Mutex
+   	products   map[string]Product
+   	sortedSKUs []string // cached sorted list of keys; nil when stale
+   }
+
+   func (m *MemoryStore) Add(p Product) {
+   	m.mu.Lock()
+   	defer m.mu.Unlock()
+   	m.products[p.SKU] = p
+   	m.sortedSKUs = nil // every write must invalidate the cache
+   }
+
+   func (m *MemoryStore) SKUs() []string {
+   	m.mu.Lock()
+   	defer m.mu.Unlock()
+   	if m.sortedSKUs == nil {
+   		m.sortedSKUs = slices.Sorted(maps.Keys(m.products))
+   	}
+   	return slices.Clone(m.sortedSKUs)
+   }
+
+   func main() {
+   	m := &MemoryStore{products: map[string]Product{}}
+   	m.Add(Product{"B"})
+   	m.Add(Product{"A"})
+   	fmt.Println(m.SKUs()) // [A B]
    }
    ```
    This adds complexity and only helps if `List()` is called repeatedly.
 
 3. **Use sync.RWMutex instead of sync.Mutex** if reads heavily outnumber writes:
    ```go
+   type Product struct{ SKU string }
+
    type MemoryStore struct {
-       mu       sync.RWMutex
-       products map[string]Product
+   	mu       sync.RWMutex
+   	products map[string]Product
+   }
+
+   func (m *MemoryStore) Get(sku string) (Product, bool) {
+   	m.mu.RLock() // many readers at once
+   	defer m.mu.RUnlock()
+   	p, ok := m.products[sku]
+   	return p, ok
+   }
+
+   func (m *MemoryStore) Add(p Product) {
+   	m.mu.Lock() // writers are exclusive
+   	defer m.mu.Unlock()
+   	m.products[p.SKU] = p
+   }
+
+   func main() {
+   	m := &MemoryStore{products: map[string]Product{}}
+   	m.Add(Product{"A-1"})
+   	fmt.Println(m.Get("A-1")) // {A-1} true
    }
    ```
    But the added complexity may not be worth it unless profiling shows contention.

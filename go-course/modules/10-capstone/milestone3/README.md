@@ -38,17 +38,27 @@ Three endpoints:
 ### Server
 
 ```go
+// The API of milestone3/store/api.go, checked against YOUR code.
+import "gocourse/modules/10-capstone/milestone3/store"
+
 // Server wraps a DB and provides HTTP handlers.
-type Server struct {
-    db *DB
-    lg *slog.Logger
+//
+//	type Server struct {
+//		db *DB
+//		lg *slog.Logger
+//	}
+
+var (
+	// NewServer creates a Server.
+	_ func(db *store.DB, lg *slog.Logger) *store.Server = store.NewServer
+
+	// Register registers the server's routes on the given mux.
+	_ func(s *store.Server, mux *http.ServeMux) = (*store.Server).Register
+)
+
+func main() {
+	fmt.Println("the Server API compiles")
 }
-
-// NewServer creates a Server.
-func NewServer(db *DB, lg *slog.Logger) *Server
-
-// Register registers the server's routes on the given mux.
-func (s *Server) Register(mux *http.ServeMux)
 ```
 
 ### Main Program
@@ -101,9 +111,27 @@ Implement the Server struct and its methods:
 
 2. **Register**: Use `mux.HandleFunc` to wire up three handlers:
    ```go
-   mux.HandleFunc("GET /kv/{key}", s.get)
-   mux.HandleFunc("PUT /kv/{key}", s.put)
-   mux.HandleFunc("DELETE /kv/{key}", s.delete)
+   type Server struct{}
+
+   func (s *Server) get(w http.ResponseWriter, r *http.Request)    { fmt.Fprintln(w, "get", r.PathValue("key")) }
+   func (s *Server) put(w http.ResponseWriter, r *http.Request)    { fmt.Fprintln(w, "put", r.PathValue("key")) }
+   func (s *Server) delete(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "delete", r.PathValue("key")) }
+
+   func (s *Server) Register(mux *http.ServeMux) {
+   	mux.HandleFunc("GET /kv/{key}", s.get)
+   	mux.HandleFunc("PUT /kv/{key}", s.put)
+   	mux.HandleFunc("DELETE /kv/{key}", s.delete)
+   }
+
+   func main() {
+   	mux := http.NewServeMux()
+   	(&Server{}).Register(mux)
+   	for _, m := range []string{"GET", "PUT", "DELETE", "POST"} {
+   		rec := httptest.NewRecorder()
+   		mux.ServeHTTP(rec, httptest.NewRequest(m, "/kv/user:1", nil))
+   		fmt.Print(m, " -> ", rec.Code, " ", rec.Body.String()) // POST gets 405
+   	}
+   }
    ```
 
 3. **writeJSON**: A helper that sets Content-Type, status, and encodes JSON. All responses use this.
@@ -146,6 +174,12 @@ type putRequest struct {
 type errorResp struct {
     Error string `json:"error"`
 }
+
+var req putRequest
+err := json.Unmarshal([]byte(`{"value":"alice","ttl":5000}`), &req)
+fmt.Printf("%+v %v\n", req, err) // {Value:alice TTL:5000} <nil>
+out, _ := json.Marshal(errorResp{Error: "key not found"})
+fmt.Println(string(out)) // {"error":"key not found"}
 ```
 
 **Logging:**
@@ -156,7 +190,23 @@ Use `logger.InfoContext(r.Context(), "event", "key", key, "status", status)` for
 `main` is provided. You write `run`:
 
 ```go
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) error
+// The signature main expects:
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("kvd", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
+	dbPath := fs.String("db", "kvd.log", "database file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "would serve", *addr, "from", *dbPath) // ...the rest is yours
+	return nil
+}
+
+func main() {
+	fmt.Println(run(context.Background(), []string{"-addr", "127.0.0.1:0"}, os.Stdout, os.Stderr))
+	fmt.Println(run(context.Background(), []string{"-port", "1"}, os.Stdout, os.Stdout)) // a parse error, returned
+}
 ```
 
 1. **Parse flags** with `flag.NewFlagSet("kvd", flag.ContinueOnError)` and
@@ -170,11 +220,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error
    close it on **every** return path. Report the error from `Close`: for a
    log file it can be the only sign that data never reached the disk.
    ```go
-   defer func() {
-       if cerr := db.Close(); cerr != nil {
-           err = errors.Join(err, fmt.Errorf("close database: %w", cerr))
-       }
-   }()
+   type fakeDB struct{}
+
+   func (fakeDB) Close() error { return errors.New("sync: input/output error") }
+
+   func run() (err error) { // a named result, so the deferred func can change it
+   	db := fakeDB{}
+   	defer func() {
+   		if cerr := db.Close(); cerr != nil {
+   			err = errors.Join(err, fmt.Errorf("close database: %w", cerr))
+   		}
+   	}()
+   	return nil // everything else went fine...
+   }
+
+   func main() {
+   	fmt.Println(run()) // ...but Close failed, and the caller hears about it
+   }
    ```
    (This needs a named result: `(err error)`.)
 
@@ -188,21 +250,57 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error
 
 6. **Create the server** and register the routes:
    ```go
-   mux := http.NewServeMux()
-   store.NewServer(db, logger).Register(mux)
-   srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+   // Uses YOUR milestone3 store.
+   import "gocourse/modules/10-capstone/milestone3/store"
+
+   func main() {
+   	dir, _ := os.MkdirTemp("", "kvd")
+   	defer os.RemoveAll(dir)
+   	db, err := store.Open(filepath.Join(dir, "kvd.log"), store.Options{})
+   	if err != nil {
+   		fmt.Println(err)
+   		return
+   	}
+   	defer db.Close()
+   	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+   	mux := http.NewServeMux()
+   	store.NewServer(db, logger).Register(mux)
+   	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+
+   	// Try the handler without a network:
+   	rec := httptest.NewRecorder()
+   	srv.Handler.ServeHTTP(rec, httptest.NewRequest("PUT", "/kv/lang", strings.NewReader(`{"value":"go"}`)))
+   	fmt.Println(rec.Code, rec.Body.String()) // when you're done: 200 {"key":"lang","value":"go"}
+   }
    ```
    `ReadHeaderTimeout` stops a client from holding a connection open forever
    by sending headers one byte at a time (the "Slowloris" attack).
 
 7. **Serve in a goroutine and wait for either outcome**:
    ```go
-   serveErr := make(chan error, 1)
-   go func() { serveErr <- srv.Serve(ln) }()
-   select {
-   case err := <-serveErr:
-       return fmt.Errorf("serve: %w", err) // failed on its own
-   case <-ctx.Done():
+   func serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
+   	serveErr := make(chan error, 1)
+   	go func() { serveErr <- srv.Serve(ln) }()
+   	select {
+   	case err := <-serveErr:
+   		return fmt.Errorf("serve: %w", err) // failed on its own
+   	case <-ctx.Done():
+   	}
+   	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+   	defer cancel()
+   	srv.Shutdown(shutdownCtx)
+   	return <-serveErr // http.ErrServerClosed after a clean shutdown
+   }
+
+   func main() {
+   	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+   	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond) // "a signal"
+   	defer cancel()
+   	fmt.Println(serve(ctx, &http.Server{}, ln)) // http: Server closed
+
+   	ln.Close() // a listener that's already closed: Serve fails at once
+   	fmt.Println(serve(context.Background(), &http.Server{}, ln)) // serve: ... use of closed network connection
    }
    ```
    Waiting only on `<-ctx.Done()` would hang forever if `Serve` failed.

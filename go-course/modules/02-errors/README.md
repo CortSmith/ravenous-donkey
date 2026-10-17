@@ -25,15 +25,27 @@ In Go, an error is a value that implements the `error` interface—just one meth
 type error interface {
     Error() string
 }
+
+// The built-in error has exactly this method set, so any error satisfies it:
+var e error = errors.New("boom")
+fmt.Println(e.Error()) // boom
 ```
 
 Errors are not exceptions; they flow through the program like any other value, subject to the same control flow rules as everything else. The convention is to return an error as the *last* result:
 
 ```go
 func ReadFile(path string) ([]byte, error) {
-    // ...
-    return data, nil  // or return nil, someErr
+	if path == "" {
+		return nil, errors.New("empty path") // failure: zero value + error
+	}
+	data := []byte("contents of " + path)
+	return data, nil // success: value + nil error
 }
+
+data, err := ReadFile("notes.txt")
+fmt.Printf("%s %v\n", data, err) // contents of notes.txt <nil>
+_, err = ReadFile("")
+fmt.Println(err) // empty path
 ```
 
 This differs fundamentally from checked exceptions (Java) or try/catch (Python/JavaScript). Go's approach is explicit and visible at the call site. Every error *can* be checked because it's in the function signature. This makes error handling intentional and testable: you can reason about what paths the code will take because errors don't automatically propagate.
@@ -55,15 +67,30 @@ var (
     ErrNotFound  = errors.New("not found")
     ErrWrongType = errors.New("wrong type")
 )
+
+err := fmt.Errorf("load user 7: %w", ErrNotFound)
+fmt.Println(err)                                                     // load user 7: not found
+fmt.Println(errors.Is(err, ErrNotFound), errors.Is(err, ErrWrongType)) // true false
 ```
 
 Name them `ErrXxx` (exported) or `errXxx` (unexported). Callers match them with `errors.Is`:
 
 ```go
-data, err := lookup(id)
-if errors.Is(err, ErrNotFound) {
-    // Handle the specific case, e.g., return a default value
+var ErrNotFound = errors.New("not found")
+
+func lookup(id int) (string, error) {
+	if id != 1 {
+		return "", fmt.Errorf("lookup %d: %w", id, ErrNotFound)
+	}
+	return "Ada", nil
 }
+
+data, err := lookup(42)
+if errors.Is(err, ErrNotFound) {
+	// Handle the specific case, e.g., return a default value
+	data = "guest"
+}
+fmt.Println(data) // guest
 ```
 
 **Why sentinels?** They represent a specific condition that a caller might handle differently. For example:
@@ -77,16 +104,17 @@ By using named sentinels, callers can *match* the specific condition without par
 **Why not `==`?** Once an error is wrapped (more below), direct comparison fails:
 
 ```go
-// Wrong: comparison fails if the error is wrapped
+var ErrNotFound = errors.New("not found")
+
+func someFunc() error { return fmt.Errorf("load item 7: %w", ErrNotFound) }
+
 err := someFunc()
-if err == ErrNotFound {  // might be false even if the underlying error IS ErrNotFound
-    // ...
-}
+
+// Wrong: comparison fails if the error is wrapped
+fmt.Println(err == ErrNotFound) // false, even though the underlying error IS ErrNotFound
 
 // Right: errors.Is looks through wrapping
-if errors.Is(err, ErrNotFound) {  // works even if wrapped
-    // ...
-}
+fmt.Println(errors.Is(err, ErrNotFound)) // true
 ```
 
 `errors.Is` searches through the error chain looking for a match, so it works regardless of how many layers of wrapping occur.
@@ -96,9 +124,17 @@ if errors.Is(err, ErrNotFound) {  // works even if wrapped
 When an error flows through layers of code, each layer can add context. Use `fmt.Errorf` with `%w`:
 
 ```go
-if err != nil {
-    return fmt.Errorf("load config %q: %w", path, err)
+func loadConfig(path string) error {
+	_, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("load config %q: %w", path, err)
+	}
+	return nil
 }
+
+err := loadConfig("/no/such/config.json")
+fmt.Println(err)                            // load config "/no/such/config.json": open /no/such/config.json: no such file or directory
+fmt.Println(errors.Is(err, fs.ErrNotExist)) // true: still matchable through the wrap
 ```
 
 This preserves the error chain: `errors.Is(err, ErrNotFound)` works even after wrapping. The last `%w` in a wrapped error becomes its "cause" (the `.Unwrap()` value).
@@ -106,46 +142,68 @@ This preserves the error chain: `errors.Is(err, ErrNotFound)` works even after w
 **Why wrap?** Errors propagate up the call stack, losing context about where they came from. A caller who sees "not found" without knowing which file wasn't found, or which user wasn't found, can't reason about the failure. Wrapping adds that context:
 
 ```go
-// Low level
-func getUser(store Store, id string) error {
-    user, err := store.Get(id)
-    if err != nil {
-        return err  // caller doesn't know what operation failed or what ID
-    }
-    return nil
+var ErrNoUser = errors.New("no such user")
+
+type Store map[string]string
+
+func (s Store) Get(id string) (string, error) {
+	u, ok := s[id]
+	if !ok {
+		return "", ErrNoUser
+	}
+	return u, nil
+}
+
+type UserService struct{ store Store }
+
+// Low level, unwrapped
+func getUserBare(store Store, id string) error {
+	_, err := store.Get(id)
+	if err != nil {
+		return err // caller doesn't know what operation failed or what ID
+	}
+	return nil
 }
 
 // Better: wrap with context
 func getUser(store Store, id string) error {
-    user, err := store.Get(id)
-    if err != nil {
-        return fmt.Errorf("get user %q: %w", id, err)  // caller knows it's about a user and which ID
-    }
-    return nil
+	_, err := store.Get(id)
+	if err != nil {
+		return fmt.Errorf("get user %q: %w", id, err) // caller knows it's about a user and which ID
+	}
+	return nil
 }
 
 // Higher level wraps again
 func (svc *UserService) GetUser(id string) error {
-    err := getUser(svc.store, id)
-    if err != nil {
-        return fmt.Errorf("load user profile: %w", err)  // now we know it's part of profile loading
-    }
-    return nil
+	err := getUser(svc.store, id)
+	if err != nil {
+		return fmt.Errorf("load user profile: %w", err) // now we know it's part of profile loading
+	}
+	return nil
 }
+
+svc := &UserService{store: Store{"u1": "Ada"}}
+fmt.Println(getUserBare(svc.store, "u9")) // no such user
+fmt.Println(svc.GetUser("u9"))            // load user profile: get user "u9": no such user
 ```
 
 The error message chain becomes: "load user profile: get user \"123\": not found". Each layer adds information without hiding the underlying cause.
 
 **Bad:**
 ```go
-return fmt.Errorf("failed to load: %v", err)  // hides err from errors.Is
+var ErrMissing = errors.New("missing")
+err := fmt.Errorf("failed to load: %v", ErrMissing) // %v hides the cause from errors.Is
+fmt.Println(err, errors.Is(err, ErrMissing))         // failed to load: missing false
 ```
 
 When `%v` is used instead of `%w`, the error is converted to a string and loses its structure. Callers can't match the underlying sentinel error anymore.
 
 **Good:**
 ```go
-return fmt.Errorf("load config: %w", err)  // err stays matchable
+var ErrMissing = errors.New("missing")
+err := fmt.Errorf("load config: %w", ErrMissing) // the cause stays matchable
+fmt.Println(err, errors.Is(err, ErrMissing))      // load config: missing true
 ```
 
 **Wrapping guidelines:**
@@ -174,6 +232,10 @@ func (e *ParseError) Error() string {
 func (e *ParseError) Unwrap() error {
     return e.Err
 }
+
+err := fmt.Errorf("load config: %w", &ParseError{Line: 3, Msg: "unexpected '}'", Err: io.ErrUnexpectedEOF})
+fmt.Println(err)                                // load config: line 3: unexpected '}'
+fmt.Println(errors.Is(err, io.ErrUnexpectedEOF)) // true: errors.Is follows Unwrap
 ```
 
 **When to use custom types:**
@@ -184,9 +246,18 @@ func (e *ParseError) Unwrap() error {
 Callers use `errors.As` to extract it:
 
 ```go
+type ParseError struct {
+	Line int
+	Msg  string
+}
+
+func (e *ParseError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Msg) }
+
+err := fmt.Errorf("read config: %w", &ParseError{Line: 3, Msg: "missing ="})
+
 var pe *ParseError
 if errors.As(err, &pe) {
-    fmt.Printf("Problem at line %d\n", pe.Line)
+	fmt.Printf("Problem at line %d\n", pe.Line) // Problem at line 3
 }
 ```
 
@@ -197,29 +268,34 @@ The `errors.As` function walks the error chain looking for a value of the target
 **Example: Multiple validation errors with structure:**
 
 ```go
+var ErrRequired = errors.New("required")
+
 type FieldError struct {
-    Field string
-    Err   error  // a sentinel like ErrRequired or ErrInvalidFormat
+	Field string
+	Err   error // a sentinel like ErrRequired or ErrInvalidFormat
 }
 
 func (e *FieldError) Error() string {
-    return fmt.Sprintf("field %q: %v", e.Field, e.Err)
+	return fmt.Sprintf("field %q: %v", e.Field, e.Err)
 }
 
 func (e *FieldError) Unwrap() error {
-    return e.Err
+	return e.Err
 }
+
+err := fmt.Errorf("signup: %w", &FieldError{Field: "email", Err: ErrRequired})
 
 // Callers can extract structured data:
 var fe *FieldError
 if errors.As(err, &fe) {
-    // Highlight the invalid field in a form
-    form.SetError(fe.Field, fe.Err.Error())
+	// e.g. highlight the invalid field in a form
+	fmt.Println("bad field:", fe.Field) // bad field: email
 }
 
 // Or match the underlying sentinel:
 if errors.Is(err, ErrRequired) {
-    // Handle all "required" failures
+	// Handle all "required" failures
+	fmt.Println("something required is missing")
 }
 ```
 
@@ -228,22 +304,34 @@ if errors.Is(err, ErrRequired) {
 ```go
 // Database layer returns an error with the table name
 type TableError struct {
-    Table string
-    Err   error
+	Table string
+	Err   error
 }
+
+func (e *TableError) Error() string { return e.Table + ": " + e.Err.Error() }
+func (e *TableError) Unwrap() error { return e.Err }
 
 // Application layer wraps that
 type AppError struct {
-    Operation string
-    Err       error
+	Operation string
+	Err       error
 }
+
+func (e *AppError) Error() string { return e.Operation + ": " + e.Err.Error() }
+func (e *AppError) Unwrap() error { return e.Err }
+
+err := error(&AppError{"save order", &TableError{"orders", errors.New("disk full")}})
 
 // A caller can extract either level:
 var ae *AppError
-if errors.As(err, &ae) { /* ... */ }
+if errors.As(err, &ae) {
+	fmt.Println("operation:", ae.Operation) // operation: save order
+}
 
 var te *TableError
-if errors.As(err, &te) { /* ... */ }
+if errors.As(err, &te) {
+	fmt.Println("table:", te.Table) // table: orders
+}
 ```
 
 ### errors.Join (Go 1.20+)
@@ -251,14 +339,34 @@ if errors.As(err, &te) { /* ... */ }
 When multiple independent errors occur—validation of several fields, cleanup failures—combine them with `errors.Join`:
 
 ```go
-var errs []error
-if name == "" {
-    errs = append(errs, &FieldError{"name", ErrRequired})
+var (
+	ErrRequired = errors.New("required")
+	ErrInvalid  = errors.New("invalid")
+)
+
+type FieldError struct {
+	Field string
+	Err   error
 }
-if age < 0 {
-    errs = append(errs, &FieldError{"age", ErrInvalid})
+
+func (e *FieldError) Error() string { return e.Field + ": " + e.Err.Error() }
+func (e *FieldError) Unwrap() error { return e.Err }
+
+func validate(name string, age int) error {
+	var errs []error
+	if name == "" {
+		errs = append(errs, &FieldError{"name", ErrRequired})
+	}
+	if age < 0 {
+		errs = append(errs, &FieldError{"age", ErrInvalid})
+	}
+	return errors.Join(errs...) // returns nil if errs is empty
 }
-return errors.Join(errs...)  // returns nil if all are nil
+
+err := validate("", -1)
+fmt.Println(err)                                                // name: required, then age: invalid (one per line)
+fmt.Println(errors.Is(err, ErrRequired), errors.Is(err, ErrInvalid)) // true true
+fmt.Println(validate("Ada", 36))                                // <nil>
 ```
 
 **When to use `errors.Join`:**
@@ -280,19 +388,22 @@ func SaveFile(path string, data []byte) error {
     if err != nil {
         return err  // file creation failed; nothing to clean up
     }
-    
+
     var writeErr error
     if _, err := f.Write(data); err != nil {
         writeErr = fmt.Errorf("write: %w", err)
     }
-    
+
     closeErr := f.Close()
     if closeErr != nil {
         closeErr = fmt.Errorf("close: %w", closeErr)
     }
-    
+
     return errors.Join(writeErr, closeErr)  // both are reported
 }
+
+fmt.Println(SaveFile(filepath.Join(os.TempDir(), "save-demo.txt"), []byte("hi"))) // <nil>
+fmt.Println(SaveFile("/no/such/dir/file.txt", []byte("hi")))                      // open /no/such/dir/file.txt: no such file or directory
 ```
 
 Both errors are visible to the caller, who can use `errors.Is` to check for either.
@@ -311,29 +422,42 @@ The key distinction: if the error is something the *caller* might have caused (b
 
 ```go
 // OK: the caller provided a bad argument; they can handle it
-func Open(path string) (*File, error) {
-    if path == "" {
-        return nil, errors.New("path is required")
-    }
-    // ...
+func Open(path string) (*os.File, error) {
+	if path == "" {
+		return nil, errors.New("path is required")
+	}
+	return os.Open(path)
 }
 
+type Stack struct{ items []int }
+
+func (s *Stack) Len() int { return len(s.items) }
+
 // OK: this violates a package invariant (programmer bug)
-func (s *Stack) Pop() T {
-    if s.Len() == 0 {
-        panic("Pop on empty stack")  // programmer error; caller didn't check Len()
-    }
-    // ...
+func (s *Stack) Pop() int {
+	if s.Len() == 0 {
+		panic("Pop on empty stack") // programmer error; caller didn't check Len()
+	}
+	v := s.items[len(s.items)-1]
+	s.items = s.items[:len(s.items)-1]
+	return v
 }
 
 // NOT OK: panicking on user input
 func ParseInt(s string) (int, error) {
-    n, err := strconv.Atoi(s)
-    if err != nil {
-        panic(err)  // NO! User provided bad input, return an error
-    }
-    return n, nil
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		panic(err) // NO! User provided bad input, return an error
+	}
+	return n, nil
 }
+
+_, err := Open("")
+fmt.Println(err) // path is required
+s := &Stack{items: []int{1}}
+fmt.Println(s.Pop()) // 1
+n, _ := ParseInt("42")
+fmt.Println(n) // 42. Now try ParseInt("forty-two") or another s.Pop()
 ```
 
 **MustXxx functions:** The pattern `MustXxx` (like `regexp.MustCompile`) is fine for initialization with constant, known-good input:
@@ -343,6 +467,8 @@ func ParseInt(s string) (int, error) {
 var emailRegex = regexp.MustCompile(`^[^@]+@[^@]+$`)
 
 // If the regex were wrong, it's a programmer error, so panicking at startup is appropriate.
+
+fmt.Println(emailRegex.MatchString("ada@example.com"), emailRegex.MatchString("not an email")) // true false
 ```
 
 But don't use `MustXxx` for user-provided data.
@@ -353,16 +479,26 @@ Library code that doesn't control its callbacks (HTTP handlers, plugin hosts, jo
 
 ```go
 func ServeRequest(w http.ResponseWriter, r *http.Request) {
-    defer func() {
-        if recovered := recover(); recovered != nil {
-            w.WriteHeader(http.StatusInternalServerError)
-            fmt.Fprintf(w, "Internal error: %v", recovered)
-            // Log it for debugging
-            log.Printf("panic in handler: %v", recovered)
-        }
-    }()
-    handleLogic(r)  // might panic, but we'll recover
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "Internal error: %v", recovered)
+			// Log it for debugging
+			log.Printf("panic in handler: %v", recovered)
+		}
+	}()
+	handleLogic(r) // might panic, but we'll recover
 }
+
+func handleLogic(r *http.Request) {
+	var counts map[string]int
+	counts[r.URL.Path]++ // bug: nil map
+}
+
+// Call the handler directly, the way a test would (module 08 covers httptest).
+rec := httptest.NewRecorder()
+ServeRequest(rec, httptest.NewRequest("GET", "/boom", nil))
+fmt.Println(rec.Code, rec.Body.String()) // 500 Internal error: assignment to entry in nil map
 ```
 
 This is appropriate at *boundaries*—places where untrusted code runs:
@@ -381,26 +517,33 @@ The pattern: catch the panic, log it, and return a safe error response to the ca
 **Outside these boundaries, recover usually indicates a design problem.** Don't use it as control flow:
 
 ```go
+var badState = true
+
 // Bad: using recover to implement try/catch
-func doSomething() {
-    defer func() {
-        if r := recover(); r != nil {
-            // handle the "error"
-        }
-    }()
-    
-    // Panicking instead of returning errors
-    if badState {
-        panic("something went wrong")  // NO!
-    }
+func doSomethingPanicky() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("caught:", r) // handle the "error"
+		}
+	}()
+
+	// Panicking instead of returning errors
+	if badState {
+		panic("something went wrong") // NO!
+	}
 }
 
 // Good: return an error normally
 func doSomething() error {
-    if badState {
-        return errors.New("something went wrong")
-    }
-    return nil
+	if badState {
+		return errors.New("something went wrong")
+	}
+	return nil
+}
+
+doSomethingPanicky()
+if err := doSomething(); err != nil {
+	fmt.Println("error:", err)
 }
 ```
 
@@ -409,15 +552,18 @@ func doSomething() error {
 If an error is important enough to log, don't also return it—the caller will log it again, and you'll see duplicate messages in logs. Log *or* return, not both (Uber style guide):
 
 ```go
-// Bad: duplicate logging
-f, err := os.Open(path)
-if err != nil {
-    log.Printf("failed to open: %v", err)  // logs once
-    return err
+func loadConfig(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("failed to open: %v", err) // Bad: logs once...
+		return err
+	}
+	return f.Close()
 }
-// Caller logs it again
+
+// ...and the caller logs it again
 if err := loadConfig("myfile.json"); err != nil {
-    log.Printf("error: %v", err)  // logs the same error a second time
+	log.Printf("error: %v", err) // the same error, a second time
 }
 ```
 
@@ -425,17 +571,18 @@ if err := loadConfig("myfile.json"); err != nil {
 
 ```go
 func LoadConfig(path string) error {
-    f, err := os.Open(path)
-    if err != nil {
-        return fmt.Errorf("open config %q: %w", path, err)  // wrap with context, don't log
-    }
-    // ...
-    return nil
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open config %q: %w", path, err) // wrap with context, don't log
+	}
+	defer f.Close()
+	// ... parse f ...
+	return nil
 }
 
 // Caller decides to log once, at the boundary
 if err := LoadConfig("myfile.json"); err != nil {
-    log.Printf("failed to load config: %v", err)  // one log message with full context
+	log.Printf("failed to load config: %v", err) // one log message with full context
 }
 ```
 
@@ -449,12 +596,19 @@ This way, each error is logged once, in context, with all the information needed
 **Related:** Never silently discard errors with `_ = someFunction()`. If you're ignoring an error intentionally, explain why in a comment:
 
 ```go
+file, err := os.CreateTemp("", "scratch-*.txt")
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(file.Name())
+
 // OK: intentional
-_ = file.Close()  // ignore close errors; the file is temporary
+_ = file.Close() // ignore close errors; the file is temporary
 
 // Better: explicit comment
 if err := file.Close(); err != nil {
-    // Ignore: we're cleaning up a temporary file, not critical
+	// Ignore: we're cleaning up a temporary file, not critical.
+	fmt.Println("ignoring:", err) // this second Close fails: file already closed
 }
 ```
 
@@ -484,41 +638,62 @@ func SaveFile(path string, data []byte) (err error) {
     if _, err := w.Write(data); err != nil {
         return fmt.Errorf("write: %w", err)  // return early; defer will still close the file
     }
-    
+
     if err := w.Flush(); err != nil {
         return fmt.Errorf("flush: %w", err)  // flush may fail; defer will still close the file
     }
-    
+
     return nil  // Close will be called by defer; if it fails, err will be set
 }
+
+fmt.Println(SaveFile(filepath.Join(os.TempDir(), "save-demo.txt"), []byte("hi"))) // <nil>
+fmt.Println(SaveFile("/no/such/dir/file.txt", []byte("hi")))                      // the Create error
 ```
 
 **Why this pattern matters:** Buffered writers hide when data actually hits the disk. If you ignore Flush or Close errors, data might not be written:
 
 ```go
+dir, _ := os.MkdirTemp("", "flush-demo")
+defer os.RemoveAll(dir)
+data := []byte("hello\n")
+
 // Bad: data might not be written
-w := bufio.NewWriter(file)
-w.Write(data)
-// Program crashes or exits before Close is called
-// The data is still in the buffer, never written to disk
+f1, _ := os.Create(filepath.Join(dir, "bad.txt"))
+w1 := bufio.NewWriter(f1)
+w1.Write(data)
+f1.Close() // closed without Flush: the data is still in w1's buffer
 
 // Good: ensure flush and close are called
-w := bufio.NewWriter(file)
-defer func() {
-    w.Flush()
-    file.Close()
+f2, _ := os.Create(filepath.Join(dir, "good.txt"))
+w2 := bufio.NewWriter(f2)
+func() {
+	defer func() {
+		w2.Flush()
+		f2.Close()
+	}()
+	w2.Write(data) // even if this panicked, flush and close would run
 }()
-w.Write(data)
-// Even if we panic, flush and close run
+
+bad, _ := os.ReadFile(filepath.Join(dir, "bad.txt"))
+good, _ := os.ReadFile(filepath.Join(dir, "good.txt"))
+fmt.Printf("bad: %q, good: %q\n", bad, good) // bad: "", good: "hello\n"
 ```
 
 **Combining multiple errors:** If both Write and Close fail, join them so the caller can see both:
 
 ```go
-var writeErr, closeErr error
-writeErr = w.Write(data)  // might fail
-closeErr = f.Close()      // might fail
-return errors.Join(writeErr, closeErr)  // caller sees both
+func save(path string, data []byte) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(data) // might fail
+	closeErr := f.Close()        // might fail
+	return errors.Join(writeErr, closeErr) // caller sees both; nil if both are nil
+}
+
+fmt.Println(save(filepath.Join(os.TempDir(), "join-demo.txt"), []byte("x"))) // <nil>
+fmt.Println(save("/no/such/dir/file.txt", []byte("x")))                      // the Create error
 ```
 
 ### The Nil-Pointer-in-Interface Gotcha
@@ -526,28 +701,42 @@ return errors.Join(writeErr, closeErr)  // caller sees both
 A common bug when returning a typed nil pointer:
 
 ```go
-func Parse(input string) (Data, error) {
-    var d *Data  // nil pointer
-    if err := readInput(&d); err != nil {
-        var pe *ParseError  // also nil
-        return d, pe  // pe is nil, but interface holds (*ParseError, nil)
-    }
-    return *d, nil
+type ParseError struct{ Line int }
+
+func (e *ParseError) Error() string { return fmt.Sprintf("parse error on line %d", e.Line) }
+
+func Parse(input string) (int, error) {
+	var pe *ParseError // nil pointer
+	n, err := strconv.Atoi(input)
+	if err != nil {
+		pe = &ParseError{Line: 1}
+	}
+	return n, pe // when pe is nil, the interface still holds (*ParseError, nil)
 }
 
-err := Parse(...)
-if err != nil {  // TRUE! interface is non-nil
-    // ...
+n, err := Parse("42")
+if err != nil { // TRUE! the interface is non-nil
+	fmt.Printf("n=%d, err != nil, err is %T(%v)\n", n, err, err)
 }
 ```
 
 Return `nil` explicitly:
 
 ```go
-if err := readInput(&d); err != nil {
-    return nil, err  // explicit nil
+type ParseError struct{ Line int }
+
+func (e *ParseError) Error() string { return fmt.Sprintf("parse error on line %d", e.Line) }
+
+func Parse(input string) (int, error) {
+	n, err := strconv.Atoi(input)
+	if err != nil {
+		return 0, &ParseError{Line: 1}
+	}
+	return n, nil // explicit nil
 }
-return *d, nil
+
+n, err := Parse("42")
+fmt.Println(n, err == nil) // 42 true
 ```
 
 ## Idioms & Best Practices

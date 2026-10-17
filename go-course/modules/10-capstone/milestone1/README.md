@@ -11,41 +11,57 @@ Implement a concurrency-safe, in-memory key-value store with per-key time-to-liv
 ### API
 
 ```go
+// The API of milestone1/store. Each assertion below checks YOUR signature:
+// this block stops compiling if one of them differs.
+import "gocourse/modules/10-capstone/milestone1/store"
+
 // Store is a concurrency-safe in-memory key-value store.
-type Store struct { ... }
+//
+//	type Store struct { /* your fields */ }
 
-// Create a new store.
-func New(opts ...Option) *Store
+var (
+	// Create a new store.
+	_ func(opts ...store.Option) *store.Store = store.New
 
-// Set stores value under key, replacing any previous value and TTL.
-// If ttl > 0, the entry expires ttl after now; otherwise it never expires.
-func (s *Store) Set(key, value string, ttl time.Duration)
+	// Set stores value under key, replacing any previous value and TTL.
+	// If ttl > 0, the entry expires ttl after now; otherwise it never expires.
+	_ func(s *store.Store, key, value string, ttl time.Duration) = (*store.Store).Set
 
-// Get returns the value stored under key.
-// It returns ErrNotFound if the key is absent or expired.
-func (s *Store) Get(key string) (string, error)
+	// Get returns the value stored under key.
+	// It returns ErrNotFound if the key is absent or expired.
+	_ func(s *store.Store, key string) (string, error) = (*store.Store).Get
 
-// Delete removes key and reports whether a live entry was removed.
-// An expired entry is removed, but Delete returns false.
-func (s *Store) Delete(key string) bool
+	// Delete removes key and reports whether a live entry was removed.
+	// An expired entry is removed, but Delete returns false.
+	_ func(s *store.Store, key string) bool = (*store.Store).Delete
 
-// Keys returns the live (unexpired) keys in ascending order.
-// The returned slice is owned by the caller.
-func (s *Store) Keys() []string
+	// Keys returns the live (unexpired) keys in ascending order.
+	// The returned slice is owned by the caller.
+	_ func(s *store.Store) []string = (*store.Store).Keys
 
-// Len returns the number of live entries.
-func (s *Store) Len() int
+	// Len returns the number of live entries.
+	_ func(s *store.Store) int = (*store.Store).Len
 
-// DeleteExpired removes every expired entry and returns how many.
-func (s *Store) DeleteExpired() int
+	// DeleteExpired removes every expired entry and returns how many.
+	_ func(s *store.Store) int = (*store.Store).DeleteExpired
 
-// RunJanitor calls DeleteExpired every interval until ctx is canceled.
-// If interval <= 0, returns immediately (janitor disabled).
-func (s *Store) RunJanitor(ctx context.Context, interval time.Duration)
+	// RunJanitor calls DeleteExpired every interval until ctx is canceled.
+	// If interval <= 0, returns immediately (janitor disabled).
+	_ func(s *store.Store, ctx context.Context, interval time.Duration) = (*store.Store).RunJanitor
+)
 
 // janitor runs one sweep per tick and returns when ctx is canceled.
 // Separating it from RunJanitor lets tests drive sweeps with a fake clock.
-func (s *Store) janitor(ctx context.Context, ticks <-chan time.Time)
+// (Unexported, so it can't be checked from here:)
+//
+//	func (s *Store) janitor(ctx context.Context, ticks <-chan time.Time)
+
+func main() {
+	s := store.New()
+	s.Set("lang", "go", time.Minute)
+	fmt.Println(s.Get("lang")) // when you're done: go <nil>
+	fmt.Println(s.Keys(), s.Len())
+}
 ```
 
 ### Behavior
@@ -107,11 +123,21 @@ The tests should **fail** until you implement the TODOs. When done, all tests pa
 
 1. **Implement `expired`**: Check if an entry is expired at a given instant.
    ```go
-   func (e entry) expired(now time.Time) bool {
-       // An entry with expiresAt == 0 never expires.
-       // Otherwise, it's expired if now >= expiresAt.
-       // Use time.Time.IsZero and Before.
+   type entry struct {
+   	value     string
+   	expiresAt time.Time // zero = never expires
    }
+
+   func (e entry) expired(now time.Time) bool {
+   	// An entry with a zero expiresAt never expires.
+   	// Otherwise, it's expired if now >= expiresAt, i.e. if now is NOT before it.
+   	return !e.expiresAt.IsZero() && !now.Before(e.expiresAt)
+   }
+
+   now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+   fmt.Println(entry{}.expired(now))                                // false: never expires
+   fmt.Println(entry{expiresAt: now}.expired(now))                  // true: expiry is inclusive
+   fmt.Println(entry{expiresAt: now.Add(time.Second)}.expired(now)) // false
    ```
 
 2. **Implement `Set`**:

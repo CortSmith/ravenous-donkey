@@ -27,6 +27,8 @@ func Greeting(name string) string {
 	}
 	return "Hello, " + name + "!"
 }
+
+fmt.Printf("%q %q %q\n", Greeting("Ada"), Greeting("  Ada \n"), Greeting("\t")) // "Hello, Ada!" "Hello, Ada!" "Hello, World!"
 ```
 
 `strings.TrimSpace` handles spaces, tabs and newlines (any Unicode white
@@ -75,6 +77,23 @@ to change `Sprintf` here.** Mention the cost as information.
 `solutions/00-setup/project/envcheck/envcheck.go`:
 
 ```go
+import "gocourse/solutions/00-setup/exercises/hello"
+
+type Env struct {
+	GoVersion   string // e.g. "go1.24.2"
+	OS, Arch    string // e.g. "linux", "amd64"
+	CPUs        int
+	InContainer bool
+}
+
+func main() { // try a few argument lists
+	env := Env{GoVersion: "go1.24.2", OS: "linux", Arch: "amd64", CPUs: 8}
+	for _, args := range [][]string{{"-name", "Ada"}, {"-v"}, {"extra"}} {
+		fmt.Printf("$ envcheck %s\n", strings.Join(args, " "))
+		fmt.Printf("(exit %d)\n\n", Run(args, env, os.Stdout, os.Stdout))
+	}
+}
+
 func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("envcheck", flag.ContinueOnError)
 	fs.SetOutput(stderr)

@@ -47,6 +47,11 @@ Implement:
 The `Store` interface defines CRUD operations for products:
 
 ```go
+// Checks the interface against YOUR MemoryStore (project/store.go).
+import inventory "gocourse/modules/03-types-interfaces/project"
+
+type Product = inventory.Product
+
 type Store interface {
 	Add(p Product) error
 	Get(sku string) (Product, error)
@@ -54,6 +59,10 @@ type Store interface {
 	Delete(sku string) error
 	List() []Product
 }
+
+var s Store = inventory.NewMemoryStore() // compiles: the method set matches
+err := s.Add(Product{SKU: "A-1", Name: "Widget", PriceCents: 199, Quantity: 10})
+fmt.Println("Add:", err, "List:", s.List()) // "not implemented" until you write it
 ```
 
 - **`Add(p Product) error`**: inserts a new product. Return an error wrapping `ErrDuplicate` if the SKU already exists.
@@ -78,14 +87,28 @@ type Store interface {
 The `Alerter` interface notifies when a product enters low-stock status:
 
 ```go
+import inventory "gocourse/modules/03-types-interfaces/project"
+
+type Product = inventory.Product
+
 type Alerter interface {
 	LowStock(p Product)
 }
+
+var _ Alerter = inventory.AlerterFunc(nil) // YOUR AlerterFunc satisfies it
+
+var a Alerter = inventory.AlerterFunc(func(p Product) { fmt.Println("low stock:", p.SKU) })
+a.LowStock(Product{SKU: "A-1"}) // low stock: A-1 (once your AlerterFunc calls f)
 ```
 
 Implement **`AlerterFunc`**: a function adapter like `http.HandlerFunc`. It should allow a function to satisfy the `Alerter` interface.
 
 ```go
+type Product struct {
+	SKU      string
+	Quantity int
+}
+
 type AlerterFunc func(Product)
 
 func (f AlerterFunc) LowStock(p Product) {
@@ -96,6 +119,7 @@ func (f AlerterFunc) LowStock(p Product) {
 alerter := AlerterFunc(func(p Product) {
 	fmt.Printf("Low stock: %v\n", p)
 })
+alerter.LowStock(Product{SKU: "A-1", Quantity: 2}) // Low stock: {A-1 2}
 ```
 
 ### Inventory Service

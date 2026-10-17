@@ -17,7 +17,7 @@ After this module, you'll be able to:
 The mantra in Go's performance culture is **"measure first."** It's easy to guess wrong about where the time or memory goes.
 Optimize blindly, and you waste hours on the slow path instead of the critical one. Profile, identify the hotspot, then optimize.
 
-```go
+```text
 // Guess: "for loops are slow"
 // Fact: your parser is calling regexp.MustCompile 1000 times per line
 ```
@@ -32,20 +32,29 @@ Go 1.24 introduced `testing.B.Loop`, which makes benchmarks simpler and more idi
 ```go
 // CORRECT (Go 1.24+)
 func BenchmarkJoin(b *testing.B) {
-    parts := makeParts(1000)
-    b.ReportAllocs()
-    for b.Loop() {
-        _ = strings.Join(parts, ",")
-    }
+	parts := makeParts(1000)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = strings.Join(parts, ",")
+	}
 }
 
 // OLD STYLE (still works, but less idiomatic)
-func BenchmarkJoin(b *testing.B) {
-    parts := makeParts(1000)
-    b.ReportAllocs()
-    for i := 0; i < b.N; i++ {
-        _ = strings.Join(parts, ",")
-    }
+func BenchmarkJoinOld(b *testing.B) {
+	parts := makeParts(1000)
+	b.ReportAllocs()
+	b.ResetTimer() // b.N style needs this to exclude the setup; b.Loop does it for you
+	for i := 0; i < b.N; i++ {
+		_ = strings.Join(parts, ",")
+	}
+}
+
+func makeParts(n int) []string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "part" + strconv.Itoa(i)
+	}
+	return parts
 }
 ```
 
@@ -68,20 +77,39 @@ that fails if the code is too slow.
 
 ```go
 func TestAppendIntsAllocs(t *testing.T) {
-    nums := testNums(200)
-    dst := make([]byte, 0, 8192)
-    want := string(AppendInts(nil, nums, ','))
-    
-    allocs := testing.AllocsPerRun(100, func() {
-        dst = AppendInts(dst[:0], nums, ',')
-    })
-    
-    if string(dst) != want {
-        t.Fatalf("output changed between calls")
-    }
-    if allocs != 0 {
-        t.Errorf("AppendInts allocates %.0f times, want 0", allocs)
-    }
+	nums := testNums(200)
+	dst := make([]byte, 0, 8192)
+	want := string(AppendInts(nil, nums, ','))
+
+	allocs := testing.AllocsPerRun(100, func() {
+		dst = AppendInts(dst[:0], nums, ',')
+	})
+
+	if string(dst) != want {
+		t.Fatalf("output changed between calls")
+	}
+	if allocs != 0 {
+		t.Errorf("AppendInts allocates %.0f times, want 0", allocs)
+	}
+}
+
+// AppendInts appends nums to dst, separated by sep.
+func AppendInts(dst []byte, nums []int, sep byte) []byte {
+	for i, n := range nums {
+		if i > 0 {
+			dst = append(dst, sep)
+		}
+		dst = strconv.AppendInt(dst, int64(n), 10)
+	}
+	return dst
+}
+
+func testNums(n int) []int {
+	nums := make([]int, n)
+	for i := range nums {
+		nums[i] = i * 7919
+	}
+	return nums
 }
 ```
 
@@ -140,11 +168,18 @@ When a value is stored in an `interface{}` or a concrete interface, the runtime 
 allocate a small header holding the type and a pointer to the value.
 
 ```go
-// BAD: fmt.Sprintf boxes n into interface{}
-s := fmt.Sprintf("%d", n)
+func TestFormatAllocs(t *testing.T) {
+	n := 123456
+	dst := make([]byte, 0, 32)
 
-// GOOD: strconv.AppendInt never allocates (when dst has capacity)
-dst = strconv.AppendInt(dst, int64(n), 10)
+	// BAD: fmt.Sprintf boxes n into interface{} and allocates the result string
+	bad := testing.AllocsPerRun(100, func() { _ = fmt.Sprintf("%d", n) })
+
+	// GOOD: strconv.AppendInt never allocates (when dst has capacity)
+	good := testing.AllocsPerRun(100, func() { dst = strconv.AppendInt(dst[:0], int64(n), 10) })
+
+	t.Logf("Sprintf: %.0f allocs, AppendInt: %.0f allocs", bad, good) // 2 vs 0: the boxed int and the result string
+}
 ```
 
 **Lesson:** Use `strconv` for number formatting, not `fmt`. `strconv.Append*` functions write directly
@@ -155,22 +190,41 @@ into a `[]byte`, avoiding the intermediate string and the boxing.
 Each `s += x` allocates a new string, copies the old one, and discards the old one. O(n²) behavior:
 
 ```go
-// BAD: quadratic
-s := ""
-for _, w := range words {
-    s += w + ","
+func joinBad(words []string) string {
+	// BAD: quadratic
+	s := ""
+	for _, w := range words {
+		s += w + ","
+	}
+	return s
 }
 
-// GOOD: linear
-var sb strings.Builder
-sb.Grow(estimatedLen)
-for i, w := range words {
-    if i > 0 {
-        sb.WriteByte(',')
-    }
-    sb.WriteString(w)
+func joinGood(words []string, estimatedLen int) string {
+	// GOOD: linear
+	var sb strings.Builder
+	sb.Grow(estimatedLen)
+	for i, w := range words {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(w)
+	}
+	return sb.String()
 }
-return sb.String()
+
+func BenchmarkJoin(b *testing.B) {
+	words := strings.Fields(strings.Repeat("lorem ipsum dolor ", 300))
+	b.Run("concat", func(b *testing.B) {
+		for b.Loop() {
+			joinBad(words)
+		}
+	})
+	b.Run("builder", func(b *testing.B) {
+		for b.Loop() {
+			joinGood(words, 6*len(words))
+		}
+	})
+}
 ```
 
 `strings.Builder.Grow(n)` preallocates the exact size, then writes to the internal buffer without further allocation.
@@ -181,23 +235,54 @@ return sb.String()
 Doing this once per call is wasteful.
 
 ```go
+type Version struct{ Major, Minor, Patch int }
+
+func parseWith(re *regexp.Regexp, s string) (Version, error) {
+	if !re.MatchString(s) {
+		return Version{}, fmt.Errorf("bad version %q", s)
+	}
+	var v Version
+	fmt.Sscanf(s, "%d.%d.%d", &v.Major, &v.Minor, &v.Patch)
+	return v, nil
+}
+
 // BAD: recompiles every call
-func Parse(s string) (Version, error) {
-    re := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
-    return parseWith(re, s)
+func ParseSlow(s string) (Version, error) {
+	re := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	return parseWith(re, s)
 }
 
 // GOOD: compile once at package init
 var versionRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 func Parse(s string) (Version, error) {
-    return parseWith(versionRE, s)
+	return parseWith(versionRE, s)
 }
 
 // EVEN BETTER: avoid regex altogether
-func Parse(s string) (Version, error) {
-    parts := strings.Split(s, ".")
-    // manual validation, no allocation after Split
+func ParseManual(s string) (Version, error) {
+	var nums [3]int
+	for i := range nums {
+		part, rest, found := strings.Cut(s, ".")
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 || (i < 2) != found {
+			return Version{}, fmt.Errorf("bad version %q", s)
+		}
+		nums[i], s = n, rest
+	}
+	return Version{nums[0], nums[1], nums[2]}, nil
+}
+
+func BenchmarkParse(b *testing.B) {
+	for name, parse := range map[string]func(string) (Version, error){
+		"slow": ParseSlow, "precompiled": Parse, "manual": ParseManual,
+	} {
+		b.Run(name, func(b *testing.B) {
+			for b.Loop() {
+				parse("1.24.2")
+			}
+		})
+	}
 }
 ```
 
@@ -206,29 +291,45 @@ func Parse(s string) (Version, error) {
 Maps and slices grow by doubling their backing arrays. Each growth allocates and rehashes/copies.
 
 ```go
-// BAD: grow step by step
-seen := map[string]bool{}  // starts empty
-var out []string
-for _, x := range items {
-    if !seen[x] {
-        seen[x] = true
-        out = append(out, x)
-    }
-}
+func BenchmarkDedupe(b *testing.B) {
+	items := make([]string, 500) // mostly distinct, as in a typical dedupe
+	for i := range items {
+		items[i] = strconv.Itoa(i % 450)
+	}
 
-// GOOD: preallocate
-seen := make(map[string]bool, len(items))
-out := make([]string, 0, len(items))
-for _, x := range items {
-    if !seen[x] {
-        seen[x] = true
-        out = append(out, x)
-    }
+	// BAD: grow step by step
+	b.Run("grow", func(b *testing.B) {
+		for b.Loop() {
+			seen := map[string]bool{} // starts empty
+			var out []string
+			for _, x := range items {
+				if !seen[x] {
+					seen[x] = true
+					out = append(out, x)
+				}
+			}
+		}
+	})
+
+	// GOOD: preallocate
+	b.Run("prealloc", func(b *testing.B) {
+		for b.Loop() {
+			seen := make(map[string]bool, len(items))
+			out := make([]string, 0, len(items))
+			for _, x := range items {
+				if !seen[x] {
+					seen[x] = true
+					out = append(out, x)
+				}
+			}
+		}
+	})
 }
 ```
 
-With preallocation, the map is sized to fit all entries, and the slice grows at most once. Allocations drop from ~10
-to ~1 or 2.
+With preallocation, the map is sized to fit all entries and the slice never grows. On this input, allocations drop
+from about 25 to 4 per call and the time to about a third. When the input is full of duplicates, though, `len(items)`
+overestimates the result and preallocating can cost more than it saves. Measure with your real data.
 
 #### 5. Reusable Buffers
 
@@ -236,21 +337,37 @@ When encoding or building structured output repeatedly (e.g., in a server), keep
 and reset it for each operation:
 
 ```go
+type Record struct {
+	Name string
+	Age  int
+}
+
 type Encoder struct {
-    w   io.Writer
-    buf []byte  // reusable buffer
+	w   io.Writer
+	buf []byte // reusable buffer
 }
 
 func NewEncoder(w io.Writer) *Encoder {
-    return &Encoder{w: w, buf: make([]byte, 0, 4096)}
+	return &Encoder{w: w, buf: make([]byte, 0, 4096)}
 }
 
 func (e *Encoder) Encode(r Record) error {
-    e.buf = e.buf[:0]  // reset, keep capacity
-    e.buf = append(e.buf, "name="...)
-    // ... build into e.buf ...
-    _, err := e.w.Write(e.buf)
-    return err
+	e.buf = e.buf[:0] // reset, keep capacity
+	e.buf = append(e.buf, "name="...)
+	e.buf = append(e.buf, r.Name...)
+	e.buf = append(e.buf, " age="...)
+	e.buf = strconv.AppendInt(e.buf, int64(r.Age), 10)
+	e.buf = append(e.buf, '\n')
+	_, err := e.w.Write(e.buf)
+	return err
+}
+
+func main() {
+	enc := NewEncoder(os.Stdout)
+	enc.Encode(Record{"Ada", 36})
+	enc.Encode(Record{"Grace", 85})
+	allocs := testing.AllocsPerRun(100, func() { NewEncoder(io.Discard).Encode(Record{"x", 1}) })
+	fmt.Println("allocs per NewEncoder+Encode:", allocs) // the buffer; Encode itself adds none
 }
 ```
 

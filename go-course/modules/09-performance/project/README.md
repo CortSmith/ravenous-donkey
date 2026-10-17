@@ -103,32 +103,44 @@ Look at the "top" allocators. You'll likely see:
 The three regex validators can be replaced with simple character checks:
 
 ```go
-// OLD: regexes compiled on every call
-if !methodRE.MatchString(f[1]) { ... }
-if !statusRE.MatchString(f[3]) { ... }
-if !numberRE.MatchString(f[4]) { ... }
+// OLD: regexes on every line
+//
+//	if !methodRE.MatchString(f[1]) { ... }
+//	if !statusRE.MatchString(f[3]) { ... }
+//	if !numberRE.MatchString(f[4]) { ... }
 
 // NEW: manual validation
 func isMethod(s string) bool {
-    if len(s) == 0 { return false }
-    for _, c := range s {
-        if c < 'A' || c > 'Z' { return false }
-    }
-    return true
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if c < 'A' || c > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func isStatus(s string) bool {
-    return len(s) == 3 && s[0] >= '1' && s[0] <= '5' && 
-           s[1] >= '0' && s[1] <= '9' && s[2] >= '0' && s[2] <= '9'
+	return len(s) == 3 && s[0] >= '1' && s[0] <= '5' &&
+		s[1] >= '0' && s[1] <= '9' && s[2] >= '0' && s[2] <= '9'
 }
 
 func isDecimal(s string) bool {
-    if len(s) == 0 { return false }
-    for _, c := range s {
-        if c < '0' || c > '9' { return false }
-    }
-    return true
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
+
+fmt.Println(isMethod("GET"), isMethod("get"), isStatus("404"), isStatus("600"), isDecimal("120"), isDecimal("-1"))
+// true false true false true false
 ```
 
 (The existing regex compilation is static, but calling MatchString still allocates. Skipping regex entirely is better.)
@@ -138,44 +150,79 @@ func isDecimal(s string) bool {
 `strings.FieldsFunc` allocates a slice of fields. Instead, find field boundaries manually:
 
 ```go
-// OLD
-f := strings.FieldsFunc(line, isSep)
-if len(f) != 6 { ... }
-method := f[1]
-path := f[2]
-// etc.
+line := "2026-10-11T12:00:00Z GET /api/users 200 12 5120"
 
-// NEW: parse into local variables without allocating
-type field struct { start, end int }
+// OLD: allocates a []string for every line
+f := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' })
+fmt.Println(f[1], f[2])
+
+// NEW: record field boundaries in a fixed-size array (no allocation)
+type field struct{ start, end int }
 var fields [6]field
-fieldIdx := 0
-inField := false
-// ... scan through line, marking field boundaries ...
-method := line[fields[1].start:fields[1].end]
+n, inField := 0, false
+for i := 0; i <= len(line) && n <= 6; i++ {
+	sep := i == len(line) || line[i] == ' ' || line[i] == '\t'
+	switch {
+	case !sep && !inField: // a field starts
+		if n < 6 {
+			fields[n].start = i
+		}
+		inField = true
+	case sep && inField: // a field ends
+		if n < 6 {
+			fields[n].end = i
+		}
+		n++
+		inField = false
+	}
+}
+method := line[fields[1].start:fields[1].end] // substrings share line's memory: no copy
 path := line[fields[2].start:fields[2].end]
-// etc.
+fmt.Println(method, path, n == 6)
 ```
 
 Or use a simpler approach: count separators and extract fields by index:
 
 ```go
+// entry is one parsed log line (as in logstats.go).
+type entry struct {
+	method   string
+	path     string
+	status   int
+	duration int64
+	bytes    int64
+}
+
 func parseLineManual(line string) (entry, error) {
-    var parts [6]string
-    partIdx := 0
-    start := 0
-    
-    for i := 0; i <= len(line); i++ {
-        if i == len(line) || line[i] == ' ' || line[i] == '\t' {
-            if i > start { // non-empty field
-                parts[partIdx] = line[start:i]
-                partIdx++
-                if partIdx > 6 { break }
-            }
-            start = i + 1
-        }
-    }
-    if partIdx != 6 { return entry{}, ... }
-    // validate and extract parts[0..5]
+	var parts [6]string
+	partIdx := 0
+	start := 0
+
+	for i := 0; i <= len(line); i++ {
+		if i == len(line) || line[i] == ' ' || line[i] == '\t' {
+			if i > start { // non-empty field
+				if partIdx == 6 {
+					return entry{}, errors.New("too many fields")
+				}
+				parts[partIdx] = line[start:i]
+				partIdx++
+			}
+			start = i + 1
+		}
+	}
+	if partIdx != 6 {
+		return entry{}, errors.New("too few fields")
+	}
+	// validate and extract parts[0..5] (validation left to you)
+	status, _ := strconv.Atoi(parts[3])
+	dur, _ := strconv.ParseInt(parts[4], 10, 64)
+	size, _ := strconv.ParseInt(parts[5], 10, 64)
+	return entry{method: parts[1], path: parts[2], status: status, duration: dur, bytes: size}, nil
+}
+
+func main() {
+	fmt.Println(parseLineManual("2026-10-11T12:00:00Z GET /api/users 200 12 5120"))
+	fmt.Println(parseLineManual("2026-10-11T12:00:00Z GET /api/users 200"))
 }
 ```
 
@@ -184,8 +231,10 @@ func parseLineManual(line string) (entry, error) {
 When parsing integers, `strconv.Atoi` is simpler than `strconv.ParseInt`. But don't parse unless you've validated the format:
 
 ```go
-// Only call Atoi if isDecimal returned true
-status, _ := strconv.Atoi(parts[3])  // safe, no error possible if validated
+parts := [6]string{"2026-10-11T12:00:00Z", "GET", "/", "404", "3", "0"}
+// Only call Atoi if isStatus/isDecimal returned true:
+status, _ := strconv.Atoi(parts[3]) // safe, no error possible if validated
+fmt.Println(status)                 // 404
 ```
 
 Or use `strconv.ParseInt` with error handling as a fallback.
@@ -195,11 +244,20 @@ Or use `strconv.ParseInt` with error handling as a fallback.
 The maps `Methods`, `Status`, and `Paths` start empty and grow. If you can estimate their final size, preallocate:
 
 ```go
+// The types, from logstats.go:
+import logstats "gocourse/modules/09-performance/project"
+
+type (
+	Summary   = logstats.Summary
+	PathStats = logstats.PathStats
+)
+
 s := Summary{
-    Methods: make(map[string]int, 10),  // guess: ~10 distinct methods
-    Status:  make(map[int]int, 10),     // guess: ~10 distinct status codes
-    Paths:   make(map[string]PathStats, 100), // guess: ~100 distinct paths
+	Methods: make(map[string]int, 10),        // guess: ~10 distinct methods
+	Status:  make(map[int]int, 10),           // guess: ~10 distinct status codes
+	Paths:   make(map[string]PathStats, 100), // guess: ~100 distinct paths
 }
+fmt.Println(len(s.Methods), len(s.Paths)) // 0 0: sized, but still empty
 ```
 
 In tests, this reduces growth-related allocations.

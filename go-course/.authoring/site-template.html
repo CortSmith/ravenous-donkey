@@ -92,6 +92,24 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .warn { border-color: var(--warn); }
 .warn h3 { color: var(--warn); }
 .offline { color: var(--warn); font-size: 13px; }
+/* snippet runner */
+.snip { margin: 1em 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--code); }
+#content .snip pre { margin: 0; border: 0; border-radius: 0; }
+.snip pre code[contenteditable] { outline: none; display: block; min-height: 1.4em; }
+.snip.editing { border-color: var(--accent); }
+.snip-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 5px 8px; border-top: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--muted); }
+.snip-bar button { padding: 3px 10px; font-size: 12px; }
+.snip-bar .hint { margin-right: auto; }
+.snip-bar .tag { color: var(--warn); }
+.snip-out { border-top: 1px solid var(--line); background: var(--bg); padding: 8px 12px; font-size: 13px; }
+.snip-out .status { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.snip-out .status.bad { color: var(--warn); }
+.snip-out .status.ok { color: var(--done); }
+#content .snip-out pre { margin: 4px 0 0; padding: 8px 10px; background: var(--code); border: 1px solid var(--line); border-radius: 6px; max-height: 360px; overflow: auto; white-space: pre-wrap; }
+.snip-out .notes { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+.snip-out details { margin-top: 6px; font-size: 12px; }
+.snip-out details summary { cursor: pointer; color: var(--muted); }
+.snip-out .help code { font-size: 12px; }
 #menu { display: none; }
 .hljs-keyword, .hljs-built_in { color: #a626a4; } .hljs-string { color: #50a14f; } .hljs-comment { color: var(--muted); font-style: italic; }
 .hljs-number, .hljs-literal { color: #986801; } .hljs-title, .hljs-title.function_ { color: #4078f2; } .hljs-type { color: #c18401; }
@@ -125,7 +143,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 const DATA = /*__DATA__*/null;
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const fileURL = p => "file://" + encodeURI(p);
+// Served by cmd/runner (http): course files are served by it too, so link
+// to them relative to the course root. Opened from disk: link with file://.
+const served = location.protocol.startsWith("http");
+const fileURL = p => served && (p === DATA.root || p.startsWith(DATA.root + "/"))
+  ? encodeURI(p.slice(DATA.root.length) || "/") : "file://" + encodeURI(p);
 
 // ---------- persistence (per-browser progress) ----------
 const store = {
@@ -138,6 +160,12 @@ function setDone(id, v) { if (v) done[id] = true; else delete done[id]; store.se
 
 // ---------- markdown ----------
 const hasMarked = typeof marked !== "undefined";
+// ```go expect=compile-error|runtime-error marks a block that is meant to fail.
+if (hasMarked) marked.use({ renderer: { code(code, info) {
+  const m = /^go\b.*\bexpect=(\S+)/.exec(info || "");
+  if (!m) return false;
+  return `<pre><code class="language-go" data-expect="${esc(m[1])}">${esc(code.replace(/\n$/, ""))}</code></pre>\n`;
+} } });
 function md(text) {
   if (!hasMarked) return `<p class="offline">Offline: showing plain text (the Markdown renderer loads from cdnjs).</p><pre>${esc(text)}</pre>`;
   return marked.parse(text, { gfm: true });
@@ -147,6 +175,8 @@ function enhance(el, baseDir) {
   if (typeof hljs !== "undefined") el.querySelectorAll("pre code").forEach(c => {
     if (!c.className || /language-(go|bash|sh)/.test(c.className)) { try { hljs.highlightElement(c); } catch {} }
   });
+  // runnable Go snippets
+  el.querySelectorAll("pre > code.language-go").forEach(makeRunnable);
   // heading ids
   el.querySelectorAll("h2, h3").forEach(h => { if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); });
   // relative links → in-app routes or file:// paths
@@ -172,6 +202,100 @@ function routeForPath(abs) {
   if (p === DATA.root) return "#/";
   if (abs === DATA.root + "/docs/RESOURCES.md") return "#/resources";
   return null;
+}
+
+// ---------- snippet runner (talks to cmd/runner) ----------
+let runnerOK = null; // null: unknown, then true/false
+async function runnerAvailable() {
+  if (!served) return false;
+  if (runnerOK === null) { try { runnerOK = (await fetch("/api/ping")).ok; } catch { runnerOK = false; } }
+  return runnerOK;
+}
+const isExcerpt = code => /\{\s*\.\.\.\s*\}|^\s*\.\.\.\s*$/m.test(code);
+function highlight(c) {
+  if (typeof hljs === "undefined") return;
+  delete c.dataset.highlighted; c.className = "language-go";
+  try { hljs.highlightElement(c); } catch {}
+}
+function makeRunnable(code) {
+  const pre = code.parentElement;
+  const original = code.textContent;
+  const wrap = document.createElement("div");
+  wrap.className = "snip";
+  pre.replaceWith(wrap);
+  wrap.append(pre);
+  const bar = document.createElement("div");
+  bar.className = "snip-bar";
+  const expect = code.dataset.expect || "";
+  const hint = expect === "compile-error" ? `<span class="tag">Doesn't compile, on purpose:</span> run it to read the compiler's error`
+    : expect === "runtime-error" ? `<span class="tag">Fails at run time, on purpose:</span> run it to see what happens`
+    : isExcerpt(original) ? `<span class="tag">Excerpt:</span> fill in the <code>...</code> parts before running`
+    : "Click the code to edit · Ctrl+Enter runs";
+  bar.innerHTML = `<span class="hint">${hint}</span>
+    <button data-act="reset" hidden>Reset</button><button data-act="copy">Copy</button><button class="primary" data-act="run">▶ Run</button>`;
+  wrap.append(bar);
+  const out = document.createElement("div");
+  out.className = "snip-out"; out.hidden = true;
+  wrap.append(out);
+
+  try { code.contentEditable = "plaintext-only"; } catch { code.contentEditable = "true"; } // older Firefox
+  code.spellcheck = false;
+  const reset = bar.querySelector('[data-act="reset"]');
+  code.addEventListener("focus", () => wrap.classList.add("editing"));
+  code.addEventListener("blur", () => { wrap.classList.remove("editing"); const t = code.textContent; code.textContent = t; highlight(code); });
+  code.addEventListener("input", () => { reset.hidden = code.textContent === original; });
+  code.addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
+    else if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); document.execCommand("insertText", false, "\t"); }
+    else if (e.key === "Escape") code.blur();
+  });
+  reset.onclick = () => { code.textContent = original; highlight(code); reset.hidden = true; out.hidden = true; };
+  bar.querySelector('[data-act="copy"]').onclick = e => {
+    const b = e.target;
+    navigator.clipboard?.writeText(code.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => b.textContent = "Copy", 1200); });
+  };
+  const runBtn = bar.querySelector('[data-act="run"]');
+  runBtn.onclick = run;
+
+  async function run() {
+    out.hidden = false;
+    if (!(await runnerAvailable())) { out.innerHTML = runnerHelp(); return; }
+    runBtn.disabled = true; runBtn.textContent = "Running…";
+    out.innerHTML = `<div class="status">Compiling and running…</div>`;
+    try {
+      const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: code.textContent }) });
+      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+      showResult(out, await r.json(), code.textContent === original ? expect : "");
+    } catch (err) {
+      runnerOK = null;
+      out.innerHTML = `<div class="status bad">Could not reach the runner: ${esc(err.message)}</div>` + runnerHelp();
+    } finally { runBtn.disabled = false; runBtn.textContent = "▶ Run"; }
+  }
+}
+function showResult(out, r, expect) {
+  let status, cls;
+  const failedAsExpected = (expect === "compile-error" && r.phase === "build") ||
+    (expect === "runtime-error" && r.phase === "run" && r.exit !== 0 && !r.timedOut);
+  if (r.phase === "build") { status = "Build failed"; cls = "bad"; }
+  else if (r.timedOut) { status = `Stopped after the time limit (${(r.ms / 1000).toFixed(1)} s)`; cls = "bad"; }
+  else if (r.exit !== 0) { status = `Exited with status ${r.exit} · ${r.ms} ms`; cls = "bad"; }
+  else { status = `${r.mode === "test" ? "Tests ran" : "Ran"} · ${r.ms} ms`; cls = "ok"; }
+  if (failedAsExpected) { status += " — as this example intends"; cls = "ok"; }
+  const text = r.output || (r.phase === "run" ? "(no output)" : "");
+  const lines = r.program.replace(/\n$/, "").split("\n");
+  const width = String(lines.length).length;
+  const numbered = lines.map((l, i) => `${String(i + 1).padStart(width)}  ${l}`).join("\n");
+  out.innerHTML = `<div class="status ${cls}">${status}</div><pre>${esc(text)}</pre>
+    ${r.notes.length ? `<p class="notes">The runner made these changes to your snippet: ${r.notes.map(esc).join("; ")}.</p>` : ""}
+    <details ${r.phase === "build" ? "open" : ""}><summary>Program that ran${r.phase === "build" ? " (line numbers match the errors)" : ""}</summary><pre>${esc(numbered)}</pre></details>`;
+}
+function runnerHelp() {
+  const url = "http://localhost:8090/" + location.hash;
+  return `<div class="help"><div class="status bad">The snippet runner isn't available on this page.</div>
+    <p style="margin:4px 0">Start it from the course root, then open <a href="${esc(url)}">${esc(url)}</a>:</p>
+    ${cmdRows(["go run ./cmd/runner", "docker compose run --rm --service-ports runner"])}
+    <p style="font-size:12px;color:var(--muted);margin:4px 0 0">The first command uses Go on your host; the second runs it in the course container.
+    The runner listens on localhost only and accepts runs only from its own page.</p></div>`;
 }
 
 // ---------- navigation ----------

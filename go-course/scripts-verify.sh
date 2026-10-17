@@ -18,5 +18,6 @@ for m in "${mods[@]}"; do
     [ -f modules/$m/compose.yaml ] || echo "  MISSING modules/$m/compose.yaml"
     [ -f modules/$m/compose.yaml ] && { c=$(docker compose -f modules/$m/compose.yaml config -q 2>&1); [ -n "$c" ] && echo "  COMPOSE: $c"; }
   fi
+  sn=$(go run ./cmd/runner -check -strict modules/$m solutions/$m 2>&1 | grep -A3 '^FAIL' | head -12); [ -n "$sn" ] && echo "  SNIPPETS:" && echo "$sn"
   for r in modules/$m/README.md solutions/$m/REVIEW.md; do [ -f $r ] && echo "  $(basename $r): $(wc -l < $r) lines" || echo "  MISSING $r"; done
 done

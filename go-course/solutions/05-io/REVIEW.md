@@ -7,6 +7,20 @@ This document contains reference solutions and grading criteria for each exercis
 ### Readable Solution
 
 ```go
+// Reader wraps another io.Reader and ROT13-encodes every ASCII letter that is
+// read through it. All other bytes (digits, punctuation, UTF-8 continuation
+// bytes, ...) pass through unchanged.
+//
+// Because ROT13 is its own inverse, a Reader also decodes.
+type Reader struct {
+	r io.Reader
+}
+
+// NewReader returns a Reader that ROT13-transforms the bytes read from r.
+func NewReader(r io.Reader) *Reader {
+	return &Reader{r: r}
+}
+
 func (r *Reader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	for i, b := range p[:n] {
@@ -25,6 +39,10 @@ func rot13(b byte) byte {
 		return b
 	}
 }
+
+func main() {
+	io.Copy(os.Stdout, NewReader(strings.NewReader("Uryyb, Tbcure!\n"))) // Hello, Gopher!
+}
 ```
 
 The key insight is transforming exactly the n bytes that were read, then returning both n and the error (even if err != nil and n > 0, as the io.Reader contract allows).
@@ -34,19 +52,47 @@ The key insight is transforming exactly the n bytes that were read, then returni
 The optimized variant uses a 256-entry lookup table instead of branching on every byte:
 
 ```go
+// table maps every byte to its ROT13 image. It is computed once at package
+// initialisation by a pure function (no side effects), which is fine.
 var table = func() (t [256]byte) {
 	for i := range t {
 		t[i] = rot13(byte(i))
 	}
+	return t
 }()
 
+// FastReader is like Reader but uses a 256-entry lookup table instead of
+// branching on every byte.
+type FastReader struct {
+	r io.Reader
+}
+
+// Read implements io.Reader.
 func (r *FastReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
-	p = p[:n]  // helps the compiler eliminate bounds checks
+	p = p[:n] // lets the compiler prove i < len(p) below (bounds-check elimination)
 	for i, b := range p {
-		p[i] = table[b]
+		p[i] = table[b] // byte index into [256]byte: no bounds check needed
 	}
 	return n, err
+}
+
+// rot13, from rot13.go:
+
+// rot13 rotates an ASCII letter 13 places, preserving case.
+func rot13(b byte) byte {
+	switch {
+	case 'a' <= b && b <= 'z':
+		return 'a' + (b-'a'+13)%26
+	case 'A' <= b && b <= 'Z':
+		return 'A' + (b-'A'+13)%26
+	default:
+		return b
+	}
+}
+
+func main() {
+	io.Copy(os.Stdout, &FastReader{r: strings.NewReader("Uryyb, Tbcure!\n")}) // Hello, Gopher!
 }
 ```
 
@@ -71,6 +117,10 @@ func (r *FastReader) Read(p []byte) (int, error) {
 Uses `bufio.Reader.ReadLine` to handle lines of any length:
 
 ```go
+import "gocourse/solutions/05-io/exercises/linecount"
+
+type Stats = linecount.Stats
+
 func Count(r io.Reader) (Stats, error) {
 	br := bufio.NewReader(r)
 	var (
@@ -100,6 +150,10 @@ func Count(r io.Reader) (Stats, error) {
 		lineLen = 0
 	}
 }
+
+func main() {
+	fmt.Println(Count(strings.NewReader("one\r\ntwo\n" + strings.Repeat("x", 100_000)))) // {3 100000} <nil>
+}
 ```
 
 `ReadLine` returns chunks of a line (when `isPrefix == true`, more is coming) and strips both `\n` and `\r\n`. This avoids the 64 KiB limit of `Scanner` while still handling line boundaries correctly.
@@ -109,47 +163,58 @@ func Count(r io.Reader) (Stats, error) {
 Reads in fixed chunks and scans for `\n` manually:
 
 ```go
-func Count(r io.Reader) (Stats, error) {
-	const bufSize = 64 * 1024
-	buf := make([]byte, bufSize)
+import "gocourse/solutions/05-io/exercises/linecount"
+
+type Stats = linecount.Stats
+
+// CountFast is a performance-tuned Count. Instead of asking bufio for one
+// line at a time, it reads large chunks and uses bytes.IndexByte (which is
+// implemented in assembly with SIMD on common platforms) to jump from one
+// '\n' to the next. The only allocation is the 64 KiB read buffer.
+func CountFast(r io.Reader) (Stats, error) {
 	var (
 		s       Stats
-		lineLen int
-		partial bool
+		buf     = make([]byte, 64*1024)
+		lineLen int  // bytes of the current, unfinished line
+		lastCR  bool // the last content byte of the current line is '\r'
 	)
 	for {
 		n, err := r.Read(buf)
-		for i := 0; i < n; i++ {
-			if buf[i] == '\n' {
-				s.Lines++
-				s.Longest = max(s.Longest, lineLen)
-				lineLen = 0
-				partial = false
-				continue
+		b := buf[:n]
+		for len(b) > 0 {
+			i := bytes.IndexByte(b, '\n')
+			if i < 0 {
+				lineLen += len(b)
+				lastCR = b[len(b)-1] == '\r'
+				break
 			}
-			if buf[i] == '\r' && i+1 < n && buf[i+1] == '\n' {
-				// \r\n: skip the \r in the length
-				s.Lines++
-				s.Longest = max(s.Longest, lineLen)
-				i++  // skip the \n
-				lineLen = 0
-				partial = false
-				continue
+			lineLen += i
+			if i > 0 {
+				lastCR = b[i-1] == '\r'
 			}
-			lineLen++
-			partial = true
+			if lastCR {
+				lineLen-- // "\r\n" terminator: the '\r' is not content
+			}
+			s.Lines++
+			s.Longest = max(s.Longest, lineLen)
+			lineLen, lastCR = 0, false
+			b = b[i+1:]
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				if partial {
-					s.Lines++
-					s.Longest = max(s.Longest, lineLen)
-				}
-				return s, nil
+			if !errors.Is(err, io.EOF) {
+				return s, err
 			}
-			return s, err
+			if lineLen > 0 { // unterminated last line; a trailing '\r' is content
+				s.Lines++
+				s.Longest = max(s.Longest, lineLen)
+			}
+			return s, nil
 		}
 	}
+}
+
+func main() {
+	fmt.Println(CountFast(strings.NewReader("one\r\ntwo\n" + strings.Repeat("x", 100_000)))) // {3 100000} <nil>
 }
 ```
 
@@ -170,9 +235,16 @@ func Count(r io.Reader) (Stats, error) {
 ### Readable Solution
 
 ```go
+import "gocourse/solutions/05-io/exercises/csvjson"
+
+var (
+	ErrNoHeader  = csvjson.ErrNoHeader
+	ErrBadHeader = csvjson.ErrBadHeader
+)
+
 func Convert(dst io.Writer, src io.Reader) error {
 	r := csv.NewReader(src)
-	
+
 	// Read and validate header
 	header, err := r.Read()
 	if err != nil {
@@ -181,7 +253,7 @@ func Convert(dst io.Writer, src io.Reader) error {
 		}
 		return fmt.Errorf("read header: %w", err)
 	}
-	
+
 	// Validate header
 	seen := make(map[string]bool)
 	for i, name := range header {
@@ -194,9 +266,9 @@ func Convert(dst io.Writer, src io.Reader) error {
 		seen[name] = true
 		header[i] = name
 	}
-	
+
 	enc := json.NewEncoder(dst)
-	
+
 	// Read and encode data rows
 	for {
 		record, err := r.Read()
@@ -206,7 +278,7 @@ func Convert(dst io.Writer, src io.Reader) error {
 			}
 			return fmt.Errorf("read record: %w", err)
 		}
-		
+
 		obj := make(map[string]string)
 		for i, val := range record {
 			if i < len(header) {
@@ -217,6 +289,12 @@ func Convert(dst io.Writer, src io.Reader) error {
 			return fmt.Errorf("encode record: %w", err)
 		}
 	}
+}
+
+func main() {
+	err := Convert(os.Stdout, strings.NewReader("name, age\nAda,36\nLinus,\n"))
+	fmt.Println(err) // <nil>, after one JSON object per row
+	fmt.Println(Convert(os.Stdout, strings.NewReader("a,a\n1,2\n")))
 }
 ```
 
@@ -233,14 +311,16 @@ A faster variant might reuse the object map to reduce allocations:
 ```go
 func Convert(dst io.Writer, src io.Reader) error {
 	r := csv.NewReader(src)
-	
-	// Read and validate header...
+
+	// Read the header (the readable version's validation is omitted here)
 	header, err := r.Read()
-	// ... validation ...
-	
+	if err != nil {
+		return fmt.Errorf("read header: %w", err)
+	}
+
 	enc := json.NewEncoder(dst)
 	obj := make(map[string]string, len(header))
-	
+
 	for {
 		record, err := r.Read()
 		if err != nil {
@@ -249,7 +329,7 @@ func Convert(dst io.Writer, src io.Reader) error {
 			}
 			return fmt.Errorf("read record: %w", err)
 		}
-		
+
 		// Clear and reuse the map
 		for k := range obj {
 			delete(obj, k)
@@ -263,6 +343,11 @@ func Convert(dst io.Writer, src io.Reader) error {
 			return fmt.Errorf("encode record: %w", err)
 		}
 	}
+}
+
+func main() {
+	err := Convert(os.Stdout, strings.NewReader("name,age\nAda,36\nLinus,54\n"))
+	fmt.Println(err) // one JSON object per row, then <nil>
 }
 ```
 
@@ -288,18 +373,22 @@ func Convert(dst io.Writer, src io.Reader) error {
 Uses a ring buffer of strings:
 
 ```go
+import "gocourse/solutions/05-io/exercises/tail"
+
+const MaxLineLength = tail.MaxLineLength
+
 func Tail(r io.Reader, n int) ([]string, error) {
 	if n <= 0 {
 		return []string{}, nil
 	}
-	
+
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), MaxLineLength)
-	
+
 	buf := make([]string, n)
 	idx := 0
 	count := 0
-	
+
 	for sc.Scan() {
 		buf[idx] = sc.Text()
 		idx = (idx + 1) % n
@@ -311,11 +400,11 @@ func Tail(r io.Reader, n int) ([]string, error) {
 		}
 		return nil, err
 	}
-	
+
 	if count == 0 {
 		return []string{}, nil
 	}
-	
+
 	// Copy in order (oldest first)
 	result := make([]string, min(count, n))
 	for i := range result {
@@ -323,25 +412,33 @@ func Tail(r io.Reader, n int) ([]string, error) {
 	}
 	return result, nil
 }
+
+func main() {
+	fmt.Println(Tail(strings.NewReader("1\n2\n3\n4\n5\n"), 2)) // [4 5] <nil>
+}
 ```
 
 The ring buffer avoids allocating a huge slice upfront, and stores only the last n lines.
 
-### Optimized Solution (fast.go)
+### A Simpler Alternative
 
 Avoids allocating the full ring buffer upfront:
 
 ```go
+import "gocourse/solutions/05-io/exercises/tail"
+
+const MaxLineLength = tail.MaxLineLength
+
 func Tail(r io.Reader, n int) ([]string, error) {
 	if n <= 0 {
 		return []string{}, nil
 	}
-	
+
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), MaxLineLength)
-	
+
 	buf := make([]string, 0, min(n, 1000))  // start small
-	
+
 	for sc.Scan() {
 		buf = append(buf, sc.Text())
 		if len(buf) > n {
@@ -354,8 +451,12 @@ func Tail(r io.Reader, n int) ([]string, error) {
 		}
 		return nil, err
 	}
-	
+
 	return buf, nil
+}
+
+func main() {
+	fmt.Println(Tail(strings.NewReader("1\n2\n3\n4\n5\n"), 2)) // [4 5] <nil>
 }
 ```
 
@@ -376,6 +477,23 @@ func Tail(r io.Reader, n int) ([]string, error) {
 ### Readable Solution
 
 ```go
+// ErrInvalid is wrapped by every validation error returned by Validate.
+var ErrInvalid = errors.New("invalid config")
+
+// Duration is a time.Duration that is written in JSON as a string such as
+// "1m30s" (see time.ParseDuration), instead of as an opaque nanosecond count.
+type Duration time.Duration
+
+// Config is the service configuration.
+type Config struct {
+	Name     string   `json:"name"`           // required, not blank
+	Listen   string   `json:"listen"`         // host:port, port 1-65535; default ":8080"
+	Timeout  Duration `json:"timeout"`        // > 0; default 30s
+	MaxConns int      `json:"max_conns"`      // 1-10000; default 100
+	Tags     []string `json:"tags,omitempty"` // optional; no empty tags
+	Debug    bool     `json:"debug"`          // default false
+}
+
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -432,15 +550,15 @@ func LoadFile(path string) (Config, error) {
 
 func (c Config) Validate() error {
 	var errs []error
-	
+
 	if strings.TrimSpace(c.Name) == "" {
 		errs = append(errs, fmt.Errorf("name: %w", ErrInvalid))
 	}
-	
+
 	if c.Listen == "" {
 		errs = append(errs, fmt.Errorf("listen: %w", ErrInvalid))
 	} else {
-		host, port, err := net.SplitHostPort(c.Listen)
+		_, port, err := net.SplitHostPort(c.Listen)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("listen: invalid format: %w", ErrInvalid))
 		} else {
@@ -450,25 +568,32 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	
+
 	if c.Timeout <= 0 {
 		errs = append(errs, fmt.Errorf("timeout: must be positive: %w", ErrInvalid))
 	}
-	
+
 	if c.MaxConns < 1 || c.MaxConns > 10000 {
 		errs = append(errs, fmt.Errorf("max_conns: out of range: %w", ErrInvalid))
 	}
-	
+
 	for i, tag := range c.Tags {
 		if strings.TrimSpace(tag) == "" {
 			errs = append(errs, fmt.Errorf("tags[%d]: empty: %w", i, ErrInvalid))
 		}
 	}
-	
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+func main() {
+	cfg, err := Load(strings.NewReader(`{"name": "api", "listen": ":9000", "timeout": "5s"}`))
+	fmt.Printf("%+v %v\n", cfg, err)
+	_, err = Load(strings.NewReader(`{"name": "", "listen": "nope", "timeout": "-1s"}`))
+	fmt.Println(err)
 }
 ```
 
@@ -506,107 +631,107 @@ The readable solution is already quite good. A minor optimization is to avoid cr
 ### Readable Solution (Parse)
 
 ```go
+import "gocourse/solutions/05-io/project/loganalyzer"
+
+type LogEntry = loganalyzer.LogEntry
+
+// Parse decodes one line of Apache Combined Log Format.
+// The format is: IP IDENT USERID [TIMESTAMP] "METHOD PATH HTTP/VERSION" STATUS BYTES LATENCY
 func Parse(line string) (*LogEntry, error) {
-	parts := strings.Fields(line)
-	if len(parts) < 9 {
-		return nil, errors.New("log line has too few fields")
+	// Find timestamp brackets
+	bracketStart := strings.IndexByte(line, '[')
+	if bracketStart == -1 {
+		return nil, errors.New("parse: missing timestamp bracket")
 	}
-	
-	ip := parts[0]
-	// parts[1] is ident (-)
-	userid := parts[2]
+	bracketEnd := strings.IndexByte(line[bracketStart:], ']')
+	if bracketEnd == -1 {
+		return nil, errors.New("parse: missing closing timestamp bracket")
+	}
+	bracketEnd += bracketStart
+
+	// Find quoted request line
+	quoteStart := strings.IndexByte(line[bracketEnd:], '"')
+	if quoteStart == -1 {
+		return nil, errors.New("parse: missing request line quote")
+	}
+	quoteStart += bracketEnd
+	quoteEnd := strings.IndexByte(line[quoteStart+1:], '"')
+	if quoteEnd == -1 {
+		return nil, errors.New("parse: missing closing request line quote")
+	}
+	quoteEnd += quoteStart + 1
+
+	// Parse IP and user info
+	beforeTS := strings.Fields(line[:bracketStart])
+	if len(beforeTS) < 3 {
+		return nil, errors.New("parse: not enough fields before timestamp")
+	}
+
+	ip := beforeTS[0]
+	userid := beforeTS[2]
 	if userid == "-" {
 		userid = ""
 	}
-	
-	// Find the timestamp in brackets
-	var tsStart, tsEnd int
-	for i, p := range parts {
-		if strings.HasPrefix(p, "[") {
-			tsStart = i
-			break
-		}
-	}
-	tsEnd := tsStart
-	for i := tsStart; i < len(parts); i++ {
-		if strings.HasSuffix(parts[i], "]") {
-			tsEnd = i
-			break
-		}
-	}
-	
-	// Reconstruct timestamp (may span multiple fields with spaces)
-	ts := strings.Join(parts[tsStart:tsEnd+1], " ")
-	ts = strings.TrimPrefix(strings.TrimSuffix(ts, "]"), "[")
-	
-	t, err := time.Parse("02/Jan/2006:15:04:05 -0700", ts)
+
+	// Parse timestamp
+	tsStr := line[bracketStart+1 : bracketEnd]
+	ts, err := time.Parse("02/Jan/2006:15:04:05 -0700", tsStr)
 	if err != nil {
-		return nil, fmt.Errorf("parse timestamp: %w", err)
+		return nil, fmt.Errorf("parse timestamp %q: %w", tsStr, err)
 	}
-	
-	// Find request in quotes
-	var reqStart, reqEnd int
-	for i, p := range parts {
-		if strings.HasPrefix(p, `"`) {
-			reqStart = i
-			break
-		}
+
+	// Parse request line
+	reqStr := line[quoteStart+1 : quoteEnd]
+	reqParts := strings.Fields(reqStr)
+	if len(reqParts) != 3 {
+		return nil, fmt.Errorf("parse: malformed request line %q", reqStr)
 	}
-	for i := reqStart; i < len(parts); i++ {
-		if strings.HasSuffix(parts[i], `"`) {
-			reqEnd = i
-			break
-		}
-	}
-	req := strings.Join(parts[reqStart:reqEnd+1], " ")
-	req = strings.TrimPrefix(strings.TrimSuffix(req, `"`), `"`)
-	
-	fields := strings.Fields(req)
-	if len(fields) != 3 {
-		return nil, fmt.Errorf("malformed request line: %q", req)
-	}
-	method := fields[0]
-	pathWithQuery := fields[1]
-	
-	// Strip query string
+
+	method := reqParts[0]
+	pathWithQuery := reqParts[1]
 	path, _, _ := strings.Cut(pathWithQuery, "?")
-	
-	// Status
-	statusStr := parts[reqEnd+1]
-	status, err := strconv.Atoi(statusStr)
-	if err != nil {
-		return nil, fmt.Errorf("parse status: %w", err)
+
+	// Parse status, bytes, latency
+	afterReq := strings.Fields(line[quoteEnd+1:])
+	if len(afterReq) < 3 {
+		return nil, errors.New("parse: not enough fields after request")
 	}
-	
-	// Bytes
-	bytesStr := parts[reqEnd+2]
+
+	status, err := strconv.Atoi(afterReq[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse status %q: %w", afterReq[0], err)
+	}
+
 	var bytes int64
-	if bytesStr != "-" {
-		b, err := strconv.ParseInt(bytesStr, 10, 64)
+	if afterReq[1] != "-" {
+		b, err := strconv.ParseInt(afterReq[1], 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("parse bytes: %w", err)
+			return nil, fmt.Errorf("parse bytes %q: %w", afterReq[1], err)
 		}
 		bytes = b
 	}
-	
-	// Latency
-	latencyStr := parts[reqEnd+3]
-	latencyFloat, err := strconv.ParseFloat(latencyStr, 64)
+
+	latencyFloat, err := strconv.ParseFloat(afterReq[2], 64)
 	if err != nil {
-		return nil, fmt.Errorf("parse latency: %w", err)
+		return nil, fmt.Errorf("parse latency %q: %w", afterReq[2], err)
 	}
 	latency := time.Duration(latencyFloat * float64(time.Second))
-	
+
 	return &LogEntry{
 		IP:        ip,
 		UserID:    userid,
-		Timestamp: t,
+		Timestamp: ts,
 		Method:    method,
 		Path:      path,
 		Status:    status,
 		Bytes:     bytes,
 		Latency:   latency,
 	}, nil
+}
+
+func main() {
+	e, err := Parse(`10.0.0.3 - ada [11/Oct/2026:13:00:01 +0000] "GET /api/items?page=2 HTTP/1.1" 200 512 0.120`)
+	fmt.Printf("%+v %v\n", *e, err)
 }
 ```
 
@@ -615,6 +740,16 @@ This is a bit verbose because of the bracket and quote handling, but it's clear 
 ### Analyzer
 
 ```go
+import "gocourse/solutions/05-io/project/loganalyzer"
+
+type (
+	StatusCount  = loganalyzer.StatusCount
+	PathCount    = loganalyzer.PathCount
+	LatencyStats = loganalyzer.LatencyStats
+)
+
+var Parse = loganalyzer.Parse
+
 type Analyzer struct {
 	statusCounts map[int]int
 	pathCounts   map[string]int
@@ -680,11 +815,31 @@ func (a *Analyzer) Latency() LatencyStats {
 		Max: a.latencies[n-1],
 	}
 }
+
+var lines = []string{
+	`10.0.0.2 - - [11/Oct/2026:13:00:00 +0000] "GET /api/items/7 HTTP/1.1" 200 1024 0.034`,
+	`10.0.0.3 - ada [11/Oct/2026:13:00:01 +0000] "GET /api/items?page=2 HTTP/1.1" 200 512 0.120`,
+	`10.0.0.2 - - [11/Oct/2026:13:00:02 +0000] "POST /api/items HTTP/1.1" 500 - 1.500`,
+	`not a log line`,
+}
+
+func main() {
+	a := NewAnalyzer()
+	for _, line := range lines {
+		if err := a.ProcessLine(line); err != nil {
+			fmt.Println("skipped:", err)
+		}
+	}
+	fmt.Println(a.StatusCounts(), a.TopPaths(1))
+	fmt.Printf("%+v\n", a.Latency())
+}
 ```
 
 ### CLI (main.go)
 
 ```go
+import "gocourse/solutions/05-io/project/loganalyzer"
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("loganalyzer", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -693,7 +848,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	
+
 	var input io.Reader = stdin
 	if len(fs.Args()) > 0 {
 		filename := fs.Args()[0]
@@ -706,7 +861,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			input = f
 		}
 	}
-	
+
 	a := loganalyzer.NewAnalyzer()
 	sc := bufio.NewScanner(input)
 	for sc.Scan() {
@@ -717,7 +872,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("read error: %w", err)
 	}
-	
+
 	switch *format {
 	case "text":
 		return outputText(stdout, a, *top)
@@ -733,18 +888,18 @@ func outputText(w io.Writer, a *loganalyzer.Analyzer, top int) error {
 	for _, sc := range a.StatusCounts() {
 		fmt.Fprintf(w, "  %d: %d\n", sc.Status, sc.Count)
 	}
-	
+
 	fmt.Fprintf(w, "\nTop Paths:\n")
 	for _, pc := range a.TopPaths(top) {
 		fmt.Fprintf(w, "  %s: %d\n", pc.Path, pc.Count)
 	}
-	
+
 	lat := a.Latency()
 	fmt.Fprintf(w, "\nLatency:\n")
 	fmt.Fprintf(w, "  p50: %v\n", lat.P50)
 	fmt.Fprintf(w, "  p95: %v\n", lat.P95)
 	fmt.Fprintf(w, "  max: %v\n", lat.Max)
-	
+
 	return nil
 }
 
@@ -753,25 +908,59 @@ func outputJSON(w io.Writer, a *loganalyzer.Analyzer, top int) error {
 		StatusCodes: make([]statusCodeJSON, 0),
 		TopPaths:    make([]topPathJSON, 0),
 	}
-	
+
 	for _, sc := range a.StatusCounts() {
 		out.StatusCodes = append(out.StatusCodes, statusCodeJSON{Status: sc.Status, Count: sc.Count})
 	}
-	
+
 	for _, pc := range a.TopPaths(top) {
 		out.TopPaths = append(out.TopPaths, topPathJSON{Path: pc.Path, Count: pc.Count})
 	}
-	
+
 	lat := a.Latency()
 	out.Latency = latencyJSON{
 		P50Ms: int64(lat.P50.Milliseconds()),
 		P95Ms: int64(lat.P95.Milliseconds()),
 		MaxMs: int64(lat.Max.Milliseconds()),
 	}
-	
+
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// The JSON output types, from cmd/loganalyzer/main.go:
+
+// These helper types are for JSON marshaling
+type jsonOutput struct {
+	StatusCodes []statusCodeJSON `json:"status_codes"`
+	TopPaths    []topPathJSON    `json:"top_paths"`
+	Latency     latencyJSON      `json:"latency"`
+}
+
+type statusCodeJSON struct {
+	Status int `json:"status"`
+	Count  int `json:"count"`
+}
+
+type topPathJSON struct {
+	Path  string `json:"path"`
+	Count int    `json:"count"`
+}
+
+type latencyJSON struct {
+	P50Ms int64 `json:"p50_ms"`
+	P95Ms int64 `json:"p95_ms"`
+	MaxMs int64 `json:"max_ms"`
+}
+
+func main() {
+	logs := `10.0.0.2 - - [11/Oct/2026:13:00:00 +0000] "GET /api/items/7 HTTP/1.1" 200 1024 0.034
+10.0.0.2 - - [11/Oct/2026:13:00:02 +0000] "POST /api/items HTTP/1.1" 500 - 1.500
+`
+	if err := run([]string{"-top", "1"}, strings.NewReader(logs), os.Stdout, os.Stderr); err != nil {
+		fmt.Println(err)
+	}
 }
 ```
 

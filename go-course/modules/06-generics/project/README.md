@@ -38,7 +38,20 @@ go test -run 'TestEvictsLeastRecentlyUsed' -v ./modules/06-generics/project/
 ### Construction
 
 ```go
-func New[K comparable, V any](capacity int, opts ...Option) *Cache[K, V]
+// The signature, already in lru.go:
+//
+//	func New[K comparable, V any](capacity int, opts ...Option) *Cache[K, V]
+//
+// This runs YOUR cache:
+import lru "gocourse/modules/06-generics/project"
+
+c := lru.New[string, int](2, lru.WithTTL(time.Minute))
+c.Put("a", 1)
+c.Put("b", 2)
+c.Put("c", 3) // evicts "a", the least recently used
+_, okA := c.Get("a")
+vc, okC := c.Get("c")
+fmt.Println(okA, vc, okC, c.Len()) // when you're done: false 3 true 2
 ```
 
 - `capacity` is the maximum number of entries. `New` **panics** if `capacity < 1`. A
@@ -98,6 +111,9 @@ type entry[K comparable, V any] struct {
 	value   V
 	expires time.Time
 }
+
+e := entry[string, int]{key: "a", value: 1, expires: time.Now().Add(time.Minute)}
+fmt.Println(e.key, e.value, time.Now().Before(e.expires)) // a 1 true
 ```
 
 You need the **key** in the entry. When you evict `ll.Back()`, you have to delete that

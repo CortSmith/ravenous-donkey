@@ -285,13 +285,24 @@ The `~` operator in constraints is essential when working with named types:
 ```go
 type Days int
 
-// Without ~: Days does not satisfy int
-func Sum[T int](xs []T) T { ... }
-Sum([]Days{1, 2}) // compile error
+func SumStrict[T int](xs []T) T { // without ~: only int itself
+	var total T
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
 
-// With ~: Days satisfies ~int
-func Sum[T ~int](xs []T) T { ... }
-Sum([]Days{1, 2}) // OK
+func Sum[T ~int](xs []T) T { // with ~: any type whose underlying type is int
+	var total T
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+fmt.Println(Sum([]Days{1, 2})) // OK: 3
+// SumStrict([]Days{1, 2})     // compile error: Days does not satisfy int (uncomment to see)
 ```
 
 Always include `~` when defining numeric constraints. The pattern `S ~[]E` is ubiquitous in slices to preserve the caller's type. For example, `type IntList []int; Filter(myIntList, ...)` returns `IntList`, not `[]int`.
@@ -309,24 +320,76 @@ Go's zero value semantics apply to generic types:
 Iterators have one non-negotiable rule: **check `yield`'s return value immediately and return if false**. Pattern:
 
 ```go
-// Correct: check and return
-for elem := range input {
-    if !yield(transform(elem)) {
-        return
-    }
+func Map[T, U any](input iter.Seq[T], transform func(T) U) iter.Seq[U] {
+	return func(yield func(U) bool) {
+		// Correct: check and return
+		for elem := range input {
+			if !yield(transform(elem)) {
+				return
+			}
+		}
+	}
 }
 
-// WRONG: ignores yield's return value, causes panic on early break
-for elem := range input {
-    yield(transform(elem))
+func MapWrong[T, U any](input iter.Seq[T], transform func(T) U) iter.Seq[U] {
+	return func(yield func(U) bool) {
+		// WRONG: ignores yield's return value, causes panic on early break
+		for elem := range input {
+			yield(transform(elem))
+		}
+	}
 }
+
+double := func(n int) int { return 2 * n }
+for v := range Map(slices.Values([]int{1, 2, 3}), double) {
+	fmt.Println(v)
+	break // fine
+}
+// Replace Map with MapWrong above and the break panics.
 ```
 
 The `yield` function returns false when the caller breaks early. Ignoring this causes a panic the moment a consumer calls `break`. Write tests that explicitly break:
 
 ```go
-for i, v := range Take(Naturals(), 5) {
-    if i == 2 { break } // tests that early stop works
+// Naturals returns the infinite sequence 0, 1, 2, ... It is only useful
+// with a consumer that stops, such as Take or a loop with break.
+func Naturals() iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := 0; ; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+// Take returns a sequence of at most the first n elements of seq. It never
+// pulls more than n elements from seq, and pulls none when n <= 0.
+func Take[T any](seq iter.Seq[T], n int) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		if n <= 0 {
+			return
+		}
+		taken := 0 // declared inside the closure so each range starts fresh
+		for v := range seq {
+			if !yield(v) {
+				return
+			}
+			taken++
+			if taken == n {
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	for v := range Take(Naturals(), 5) {
+		if v == 2 {
+			break // tests that early stop works: no panic
+		}
+		fmt.Println(v)
+	}
 }
 ```
 
@@ -340,10 +403,26 @@ A `iter.Seq[T]` can be ranged multiple times if state is managed correctly:
 Test both:
 
 ```go
-seq := Filter(data, predicate)
-first := slices.Collect(seq)
-second := slices.Collect(seq)
-// first and second should be equal
+// Filter returns a sequence of the elements of seq for which keep returns
+// true.
+func Filter[T any](seq iter.Seq[T], keep func(T) bool) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for v := range seq {
+			if keep(v) && !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	data := slices.Values([]int{1, 2, 3, 4})
+	predicate := func(n int) bool { return n%2 == 0 }
+	seq := Filter(data, predicate)
+	first := slices.Collect(seq)
+	second := slices.Collect(seq)
+	fmt.Println(first, second, slices.Equal(first, second)) // first and second should be equal
+}
 ```
 
 ### Efficient Slice Handling
@@ -372,8 +451,40 @@ Nil and empty are distinct in Go: `nil` is the zero value, `[]int{}` is an alloc
 Always write tests that break from the iterator loop:
 
 ```go
-for v := range Filter(input, predicate) {
-    if someCondition { break }
+// Naturals returns the infinite sequence 0, 1, 2, ... It is only useful
+// with a consumer that stops, such as Take or a loop with break.
+func Naturals() iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := 0; ; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+// Filter returns a sequence of the elements of seq for which keep returns
+// true.
+func Filter[T any](seq iter.Seq[T], keep func(T) bool) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for v := range seq {
+			if keep(v) && !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	input := Naturals()
+	predicate := func(n int) bool { return n%3 == 0 }
+	for v := range Filter(input, predicate) {
+		if v > 9 { // someCondition
+			break
+		}
+		fmt.Print(v, " ") // 0 3 6 9
+	}
+	fmt.Println()
 }
 ```
 
@@ -389,10 +500,19 @@ Generic types are **not inherently thread-safe**. A `Set[int]` shared between go
 
 ### 1. Ignoring `yield` return value in iterators
 
-```go
-// WRONG: will panic on early break
-for v := range seq {
-    yield(f(v))  // ignores return value
+```go expect=runtime-error
+func MapWrong[T, U any](seq iter.Seq[T], f func(T) U) iter.Seq[U] {
+	return func(yield func(U) bool) {
+		// WRONG: will panic on early break
+		for v := range seq {
+			yield(f(v)) // ignores return value
+		}
+	}
+}
+
+for v := range MapWrong(slices.Values([]int{1, 2, 3}), strconv.Itoa) {
+	fmt.Println(v)
+	break
 }
 ```
 
@@ -411,18 +531,33 @@ func Filter[S ~[]E, E any](s S, keep func(E) bool) S {
     }
     return out
 }
+
+nums := []int{1, 2, 3, 4}
+evens := Filter(nums, func(n int) bool { return n%2 == 0 })
+fmt.Println(evens, nums) // [2 4] [2 4 3 4]: the caller's slice was overwritten
 ```
 
 **Feedback:** The caller's slice is modified. Create a fresh slice: `var out S` (nil slice). This is a correctness bug, not a performance issue.
 
 ### 3. Missing `~` in constraint definitions
 
-```go
-// WRONG: type Days int does not satisfy int
-func Sum[T int](xs []T) T { ... }
+```go expect=compile-error
+type Days int
 
-// CORRECT: Days satisfies ~int
-func Sum[T ~int](xs []T) T { ... }
+// WRONG: type Days int does not satisfy int
+func Sum[T int](xs []T) T {
+	var total T
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+// CORRECT: Days satisfies ~int. Change the constraint to ~int and it compiles.
+
+func main() {
+	fmt.Println(Sum([]Days{1, 2}))
+}
 ```
 
 **Feedback:** When a constraint is a single type (not a union), add `~` if you want named types to satisfy it.
@@ -451,23 +586,64 @@ The All() iterator must skip expired entries. If TTL is set, the iterator should
 ### 7. Returning nil instead of empty map/slice
 
 ```go
+type Set[T comparable] struct{ m map[T]struct{} }
+
+func (s *Set[T]) Add(v T) {
+	if s.m == nil {
+		s.m = make(map[T]struct{})
+	}
+	s.m[v] = struct{}{}
+}
+
+func (s *Set[T]) All() iter.Seq[T] {
+	return func(yield func(T) bool) {
+		if s == nil {
+			return
+		}
+		for v := range s.m {
+			if !yield(v) {
+				return
+			}
+		}
+	}
+}
+
 // WRONG: returns nil
-func Union[T comparable](a, b *Set[T]) *Set[T] {
-    if a == nil && b == nil {
-        return nil  // JSON marshals differently than {}
-    }
-    ...
+func (s *Set[T]) UnionBad(o *Set[T]) *Set[T] {
+	if s == nil && o == nil {
+		return nil // the caller's next Add panics
+	}
+	out := &Set[T]{}
+	for v := range s.All() {
+		out.Add(v)
+	}
+	for v := range o.All() {
+		out.Add(v)
+	}
+	return out
 }
 
 // CORRECT: returns non-nil empty
-func Union[T comparable](a, b *Set[T]) *Set[T] {
-    result := &Set[T]{m: make(map[T]struct{})}
-    // ... add elements ...
-    return result  // guaranteed non-nil
+func (s *Set[T]) Union(o *Set[T]) *Set[T] {
+	out := &Set[T]{m: make(map[T]struct{})}
+	for v := range s.All() {
+		out.Add(v)
+	}
+	for v := range o.All() {
+		out.Add(v)
+	}
+	return out // guaranteed non-nil
+}
+
+func main() {
+	var a, b *Set[int]
+	fmt.Println(a.UnionBad(b) == nil, a.Union(b) == nil) // true false
+	a.Union(b).Add(1)                                    // fine
+	// a.UnionBad(b).Add(1)                              // panics: nil pointer dereference
 }
 ```
 
-**Feedback:** For JSON-compatible code, always return non-nil empty collections. This is a subtle but important contract.
+**Feedback:** Callers use the result directly (`a.Union(b).Add(x)`), so always return a usable, non-nil empty collection. This is a subtle but important contract.
 
 ---
 

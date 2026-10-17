@@ -15,84 +15,94 @@ Make the store durable: every mutation (Set or Delete) is appended to an append-
 This milestone extends Milestone 1's Store with two new methods and introduces Log and DB.
 
 ```go
-// Store additions (from Milestone 1)
+// The API of milestone2/store. Each assertion below checks YOUR signature:
+// this block stops compiling if one of them differs.
+import "gocourse/modules/10-capstone/milestone2/store"
 
-// SetExpiresAt stores value under key with an absolute expiry time.
-// A zero expiresAt means the entry never expires.
-// An expiresAt in the past stores an already-expired entry (reads treat as absent).
-//
-// Persistence needs this: a TTL is relative to "now", but the log records
-// the absolute expiry so a restart doesn't extend the key's life.
-func (s *Store) SetExpiresAt(key, value string, expiresAt time.Time)
+var (
+	// Store additions (from Milestone 1)
 
-// Items returns a snapshot of every live entry, sorted by key.
-// Each Item has Key, Value, and ExpiresAt (zero = never expires).
-func (s *Store) Items() []Item
+	// SetExpiresAt stores value under key with an absolute expiry time.
+	// A zero expiresAt means the entry never expires.
+	// An expiresAt in the past stores an already-expired entry (reads treat as absent).
+	//
+	// Persistence needs this: a TTL is relative to "now", but the log records
+	// the absolute expiry so a restart doesn't extend the key's life.
+	_ func(s *store.Store, key, value string, expiresAt time.Time) = (*store.Store).SetExpiresAt
 
-type Item struct {
-    Key       string
-    Value     string
-    ExpiresAt time.Time
-}
+	// Items returns a snapshot of every live entry, sorted by key.
+	// Each Item has Key, Value, and ExpiresAt (zero = never expires).
+	_ func(s *store.Store) []store.Item = (*store.Store).Items
 
-// Log is an append-only file of Records.
+	// Log is an append-only file of Records.
 
-type Op string
-const (
-    OpSet Op = "set"
-    OpDelete Op = "del"
+	// OpenLog opens the log file at path, creating if necessary.
+	// If syncWrites is true, every Append fsyncs (survives power loss).
+	// Call Replay before the first Append.
+	_ func(path string, syncWrites bool) (*store.Log, error) = store.OpenLog
+
+	// Append writes r to the end of the log.
+	_ func(l *store.Log, r store.Record) error = (*store.Log).Append
+
+	// Replay reads the log from the beginning, calling fn for each record.
+	// Handles torn final records (incomplete write from a crash).
+	_ func(l *store.Log, fn func(store.Record) error) error = (*store.Log).Replay
+
+	// Compact atomically replaces the log with a snapshot of the given records.
+	// Removes deleted, overwritten, and expired entries from disk.
+	_ func(l *store.Log, records []store.Record) error = (*store.Log).Compact
+
+	// Close closes the log file.
+	_ func(l *store.Log) error = (*store.Log).Close
+
+	// DB is a durable key-value store (wraps Store + Log).
+
+	// Open opens the database at path, replaying the log to rebuild state.
+	_ func(path string, opts store.Options) (*store.DB, error) = store.Open
+
+	// Get, Keys, Delete, RunJanitor same as Store.
+
+	// Set durably stores value under key. TTL is relative to now;
+	// it's persisted as an absolute time.
+	_ func(db *store.DB, key, value string, ttl time.Duration) error = (*store.DB).Set
+
+	// Delete durably removes key. Returns false if the key was absent.
+	_ func(db *store.DB, key string) (bool, error) = (*store.DB).Delete
+
+	// Compact rewrites the log with one "set" record per live key.
+	_ func(db *store.DB) error = (*store.DB).Compact
+
+	// Close closes the log.
+	_ func(db *store.DB) error = (*store.DB).Close
 )
 
-type Record struct {
-    Op        Op     // "set" or "del"
-    Key       string
-    Value     string     // only for "set"
-    ExpiresAt int64      // Unix nanoseconds; 0 = never expires
+// The data types, already declared in the starter:
+var (
+	_ = store.Item{Key: "k", Value: "v", ExpiresAt: time.Time{}}
+	_ = store.Record{
+		Op:        store.OpSet, // or store.OpDelete
+		Key:       "k",
+		Value:     "v", // only for "set"
+		ExpiresAt: 0,   // Unix nanoseconds; 0 = never expires
+	}
+	_ = store.Options{
+		Now:  nil,   // nil means time.Now
+		Sync: false, // fsync after every write?
+	}
+)
+
+func main() {
+	dir, _ := os.MkdirTemp("", "kvdb")
+	defer os.RemoveAll(dir)
+	db, err := store.Open(filepath.Join(dir, "kv.log"), store.Options{})
+	if err != nil {
+		fmt.Println("Open:", err)
+		return
+	}
+	defer db.Close()
+	fmt.Println(db.Set("lang", "go", 0)) // when you're done: <nil>
+	fmt.Println(db.Get("lang"))          // go <nil>
 }
-
-// OpenLog opens the log file at path, creating if necessary.
-// If syncWrites is true, every Append fsyncs (survives power loss).
-// Call Replay before the first Append.
-func OpenLog(path string, syncWrites bool) (*Log, error)
-
-// Append writes r to the end of the log.
-func (l *Log) Append(r Record) error
-
-// Replay reads the log from the beginning, calling fn for each record.
-// Handles torn final records (incomplete write from a crash).
-func (l *Log) Replay(fn func(Record) error) error
-
-// Compact atomically replaces the log with a snapshot of the given records.
-// Removes deleted, overwritten, and expired entries from disk.
-func (l *Log) Compact(records []Record) error
-
-// Close closes the log file.
-func (l *Log) Close() error
-
-// DB is a durable key-value store (wraps Store + Log).
-
-type Options struct {
-    Now func() time.Time // nil means time.Now
-    Sync bool            // fsync after every write?
-}
-
-// Open opens the database at path, replaying the log to rebuild state.
-func Open(path string, opts Options) (*DB, error)
-
-// Get, Keys, Delete, RunJanitor same as Store.
-
-// Set durably stores value under key. TTL is relative to now;
-// it's persisted as an absolute time.
-func (db *DB) Set(key, value string, ttl time.Duration) error
-
-// Delete durably removes key. Returns false if the key was absent.
-func (db *DB) Delete(key string) (bool, error)
-
-// Compact rewrites the log with one "set" record per live key.
-func (db *DB) Compact() error
-
-// Close closes the log.
-func (db *DB) Close() error
 ```
 
 ### Behavior

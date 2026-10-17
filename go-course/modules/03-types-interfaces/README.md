@@ -27,6 +27,10 @@ type Person struct {
 }
 
 p := Person{Name: "Alice", Age: 30, City: "NYC"}
+
+q := p // a copy: structs are values
+q.Age = 31
+fmt.Println(p.Age, q.Age) // 30 31
 ```
 
 Structs are values. When you assign a struct to a variable or pass it to a function, Go copies all its fields. If the struct is large (e.g., a thousand-element array), that copy can be expensive—a sign that you might want a pointer instead.
@@ -39,7 +43,13 @@ type Stack struct {
 	items []int // unexported
 }
 
-func (s *Stack) Push(v int) { ... }
+func (s *Stack) Push(v int) { s.items = append(s.items, v) }
+func (s *Stack) Len() int   { return len(s.items) }
+
+var s Stack
+s.Push(1)
+s.Push(2)
+fmt.Println(s.Len()) // 2: callers use the methods, never s.items directly
 ```
 
 ### Methods and Receivers
@@ -47,9 +57,15 @@ func (s *Stack) Push(v int) { ... }
 A method is a function attached to a type. It has a *receiver*—a special parameter between `func` and the method name:
 
 ```go
+type Stack struct{ items []int }
+
 func (s *Stack) Push(v int) {
 	s.items = append(s.items, v)
 }
+
+var s Stack
+s.Push(7) // Go takes &s for you because s is addressable
+fmt.Println(s.items) // [7]
 ```
 
 The receiver can be any named type (struct, int, string), not just pointers. The question is: should it be a value or a pointer?
@@ -71,12 +87,16 @@ func (p Point) Add(dx, dy float64) {
 
 point := Point{1, 2}
 point.Add(3, 4)
-fmt.Println(point) // still {1, 2}
+fmt.Println(point) // still {1 2}
 ```
 
 **Pointer receiver**: the method receives a pointer to the original value. Changes affect the original.
 
 ```go
+type Point struct {
+	X, Y float64
+}
+
 // Pointer receiver: changes persist
 func (p *Point) Add(dx, dy float64) {
 	p.X += dx // affects the original
@@ -85,7 +105,7 @@ func (p *Point) Add(dx, dy float64) {
 
 point := Point{1, 2}
 point.Add(3, 4)
-fmt.Println(point) // {4, 6}
+fmt.Println(point) // {4 6}
 ```
 
 **When to use each** (from [Effective Go](https://go.dev/doc/effective_go#pointers_vs_values)):
@@ -116,9 +136,17 @@ fmt.Println(stack.items) // empty—push didn't work!
 The fix is simple: use a pointer receiver.
 
 ```go
+type Stack struct {
+	items []int
+}
+
 func (s *Stack) Push(v int) {
 	s.items = append(s.items, v)
 }
+
+stack := Stack{}
+stack.Push(1)
+fmt.Println(stack.items) // [1]
 ```
 
 #### Method Sets
@@ -135,6 +163,10 @@ func (c Circle) Area() float64 { return math.Pi * c.Radius * c.Radius }
 
 // pointer receiver
 func (c *Circle) SetRadius(r float64) { c.Radius = r }
+
+c := Circle{Radius: 1}
+c.SetRadius(2) // c is addressable, so Go calls (&c).SetRadius(2)
+fmt.Printf("%.2f\n", c.Area()) // 12.57
 ```
 
 The method set of `Circle` contains only `Area()`. The method set of `*Circle` contains both `Area()` and `SetRadius()`.
@@ -158,34 +190,62 @@ type Reader interface {
 
 // *os.File has a Read method, so *os.File is a Reader.
 // *bytes.Buffer has a Read method, so *bytes.Buffer is a Reader.
+
+var _ Reader = (*os.File)(nil)
+var _ Reader = (*bytes.Buffer)(nil)
+
+var r Reader = strings.NewReader("so is *strings.Reader")
+b, _ := io.ReadAll(r)
+fmt.Println(string(b))
 ```
 
 Because interfaces are implicit, you can define them *where they are used*, not next to the implementation. This decouples your code and makes it more flexible.
 
 ```go
-// Bad: interface defined with the implementation
-package userdb
+// Bad: interface defined with the implementation (package userdb)
+type User struct{ Name string }
 
 type UserStorer interface {
 	GetUser(id int) (*User, error)
 }
 
-type PostgresDB struct { ... }
+type PostgresDB struct{ users map[int]*User }
 
-func (p *PostgresDB) GetUser(id int) (*User, error) { ... }
+func (p *PostgresDB) GetUser(id int) (*User, error) {
+	u, ok := p.users[id]
+	if !ok {
+		return nil, fmt.Errorf("user %d not found", id)
+	}
+	return u, nil
+}
+
+// The producer now dictates the abstraction to every consumer.
+var store UserStorer = &PostgresDB{users: map[int]*User{1: {"Ada"}}}
+u, _ := store.GetUser(1)
+fmt.Println(u.Name)
 ```
 
 ```go
-// Good: interface defined by the consumer
-package service
+// Good: interface defined by the consumer (package service)
+type User struct{ Name string }
 
 type UserStorer interface {
 	GetUser(id int) (*User, error)
 }
+
+type Service struct{}
 
 func (s *Service) FindUser(id int, store UserStorer) (*User, error) {
 	return store.GetUser(id)
 }
+
+// A test fake satisfies it without importing anything from service.
+type fakeStore struct{}
+
+func (fakeStore) GetUser(id int) (*User, error) { return &User{Name: "Test User"}, nil }
+
+u, _ := (&Service{}).FindUser(1, fakeStore{})
+fmt.Println(u.Name) // Test User
 ```
 
 The second approach means a new implementation (e.g., a mock for testing) doesn't need to import the service package or even know it exists. It just implements the methods it cares about.
@@ -193,7 +253,7 @@ The second approach means a new implementation (e.g., a mock for testing) doesn'
 **Keep interfaces small.** The Go philosophy: "The bigger the interface, the weaker the abstraction." Small interfaces are easier to implement, compose, and test.
 
 ```go
-// Good: focused interfaces
+// Good: focused interfaces (the same shape as io.Reader and io.Writer)
 type Reader interface {
 	Read(p []byte) (n int, err error)
 }
@@ -202,10 +262,14 @@ type Writer interface {
 	Write(p []byte) (n int, err error)
 }
 
-// Type can implement both (composition)
-func CopyAndTee(dst Writer, src Reader) error {
-	return io.Copy(dst, src)
+// Each parameter asks for only the method it uses.
+func Copy(dst Writer, src Reader) error {
+	_, err := io.Copy(dst, src)
+	return err
 }
+
+err := Copy(os.Stdout, strings.NewReader("hello from a Reader\n"))
+fmt.Println(err) // <nil>
 ```
 
 Avoid huge interfaces, especially ones with dozens of methods. If your interface has 10+ methods, consider breaking it into smaller pieces.
@@ -224,6 +288,8 @@ type Robot struct{}
 func (r Robot) Greet() string { return "beep boop" }
 
 var g Greeter = Robot{} // OK: Robot implements Greeter
+
+fmt.Println(g.Greet()) // beep boop
 ```
 
 There's no "Greeter" declaration in the Robot type; Go checks at compile time whether the method set covers the interface. This makes it easy to retrofit code with interfaces.
@@ -236,6 +302,13 @@ Many standard library functions (like `fmt.Println`, `fmt.Sprintf`) use the `fmt
 type Stringer interface {
 	String() string
 }
+
+type Celsius float64
+
+func (c Celsius) String() string { return fmt.Sprintf("%.1f°C", float64(c)) }
+
+var s Stringer = Celsius(21.5)
+fmt.Println(s.String(), Celsius(30)) // 21.5°C 30.0°C: fmt finds the same method
 ```
 
 If your type has a `String()` method, `fmt.Println` calls it automatically. This is how you customize printing:
@@ -265,26 +338,36 @@ func (c Color) String() string {
 fmt.Println(Red) // Output: red
 ```
 
-**A gotcha**: if `String()` has a pointer receiver, then printing a *value* won't call it:
+**A gotcha**: if `String()` has a pointer receiver, then printing a *value* won't call it (a value's method set has no pointer-receiver methods):
 
 ```go
-func (c *Color) String() string { ... }
+type Color int
 
-fmt.Println(Red) // doesn't call String, prints as a number
-fmt.Println(&Red) // calls String, prints as "red"
+const Red Color = 0
+
+func (c *Color) String() string { return "red" }
+
+c := Red
+fmt.Println(c)  // 0: a Color value has no String method; only *Color does
+fmt.Println(&c) // red: the pointer has it
 ```
 
 **Another gotcha**: infinite recursion. This pattern causes a stack overflow:
 
-```go
+```go expect=runtime-error
+type Color int
+
 func (c Color) String() string {
-	return fmt.Sprintf("%v", c) // calls String again!
+	return fmt.Sprintf("%v", c) // calls String again! (go vet warns about this)
 }
 
 // Fix: convert to the underlying type
-func (c Color) String() string {
-	return fmt.Sprintf("%v", int(c))
-}
+//
+//	func (c Color) String() string {
+//		return fmt.Sprintf("%v", int(c))
+//	}
+
+fmt.Println(Color(1)) // fatal error: stack overflow
 ```
 
 ### Embedding and Composition
@@ -314,13 +397,26 @@ fmt.Println(dog.Speak()) // "Buddy makes a sound"
 The `Speak()` method is promoted to `Dog`, so you can call it directly. But the receiver of the promoted method is the embedded value, not the outer struct. There is **no virtual dispatch back to the outer type**:
 
 ```go
+type Animal struct {
+	Name string
+}
+
+func (a Animal) Speak() string     { return a.Name + " makes a sound" }
+func (a Animal) Introduce() string { return "I'm " + a.Name + ". " + a.Speak() }
+
+type Dog struct {
+	Animal
+	Breed string
+}
+
 func (d Dog) Speak() string { return d.Name + " barks" }
 
-fmt.Println(dog.Speak()) // "Buddy barks" (calls Dog.Speak, not Animal.Speak)
+dog := Dog{Animal: Animal{Name: "Buddy"}}
+fmt.Println(dog.Speak()) // Buddy barks (Dog.Speak hides Animal.Speak)
 
-// But if you're using the Animal interface:
-var animal Animal = dog.Animal
-fmt.Println(animal.Speak()) // "Buddy makes a sound" (calls Animal.Speak)
+// Introduce is promoted from Animal, and inside it the receiver is the
+// Animal, so a.Speak() is Animal.Speak, never Dog.Speak:
+fmt.Println(dog.Introduce()) // I'm Buddy. Buddy makes a sound
 ```
 
 This isn't inheritance; it's just method promotion. The embedded type's receiver is always the embedded value.
@@ -328,30 +424,41 @@ This isn't inheritance; it's just method promotion. The embedded type's receiver
 **Common pitfall: exported struct embedding**. Embedding an unexported type in an exported struct leaks that type's API. This couples your code to the embedded type and makes it harder to refactor:
 
 ```go
-// Bad: client code can now access sql.DB's fields and methods directly
-type DatabaseService struct {
-	*sql.DB
+type DB struct{} // stands in for *sql.DB
+
+func (*DB) Query(q string) string { return "rows for " + q }
+func (*DB) Close() error          { return nil }
+
+// Bad: client code can now access DB's fields and methods directly
+type LeakyService struct {
+	*DB
 }
 
 // Good: explicit composition
 type DatabaseService struct {
-	db *sql.DB
+	db *DB
 }
 
-func (s *DatabaseService) Query(query string) { ... }
+func (s *DatabaseService) Query(query string) string { return s.db.Query(query) }
+
+leaky := LeakyService{&DB{}}
+leaky.Close() // anyone can close your connection pool
+good := DatabaseService{&DB{}}
+fmt.Println(good.Query("users")) // only the methods you chose
 ```
 
 Another pitfall: **embedding a Mutex in an exported struct**. The Mutex's `Lock()` and `Unlock()` methods are promoted to the struct, which defeats the purpose of hiding synchronization:
 
 ```go
 // Bad: Lock and Unlock are exposed
-type Cache struct {
+type LeakyCache struct {
 	sync.Mutex
 	items map[string]string
 }
 
-cache := Cache{}
-cache.Lock() // public API—not what you want
+leaky := LeakyCache{}
+leaky.Lock() // public API—not what you want
+leaky.Unlock()
 
 // Good: unexported named field
 type Cache struct {
@@ -364,21 +471,28 @@ func (c *Cache) Get(key string) string {
 	defer c.mu.Unlock()
 	return c.items[key]
 }
+
+cache := &Cache{items: map[string]string{"k": "v"}}
+fmt.Println(cache.Get("k")) // v
 ```
 
 **Embedding interfaces** in other interfaces is idiomatic and useful:
 
 ```go
 type ReadCloser interface {
-	Reader
-	Closer
+	io.Reader
+	io.Closer
 }
 
 // equivalent to:
-type ReadCloser interface {
+type ReadCloserSpelledOut interface {
 	Read(p []byte) (n int, err error)
 	Close() error
 }
+
+var rc ReadCloser = io.NopCloser(strings.NewReader("x"))
+var rc2 ReadCloserSpelledOut = rc // same method set, so this assignment compiles
+fmt.Println(rc2.Close())          // <nil>
 ```
 
 ### Type Assertions and Type Switches
@@ -399,8 +513,10 @@ if ok {
 
 Always use the comma-ok form (`v, ok := expr.(T)`); a bare assertion panics if the type doesn't match:
 
-```go
-f := r.(*os.File) // panics if r is not *os.File
+```go expect=runtime-error
+var r io.Reader = strings.NewReader("not a file")
+f := r.(*os.File) // panics: interface conversion: io.Reader is *strings.Reader, not *os.File
+fmt.Println(f)
 ```
 
 For multiple possible types, use a **type switch**:
@@ -418,6 +534,11 @@ func describe(v interface{}) {
 		fmt.Printf("unknown: %T\n", v)
 	}
 }
+
+describe("go")        // string: "go"
+describe(42)          // int: 42
+describe(time.Second) // Stringer: 1s
+describe(3.14)        // unknown: float64
 ```
 
 The type switch unwraps the dynamic type for each case. This is cleaner than repeated assertions.
@@ -430,7 +551,7 @@ func (e *MyError) Error() string { return e.msg }
 
 err := fmt.Errorf("operation failed: %w", &MyError{"inner"})
 
-// Type switch checks the outer *errors.errorString, not *MyError:
+// Type switch checks the outer *fmt.wrapError, not *MyError:
 switch err.(type) {
 case *MyError:
 	fmt.Println("caught inner error")  // this won't run
@@ -454,6 +575,10 @@ if errors.As(err, &me) {
 An interface value is nil only if both its dynamic type and dynamic value are nil. A common mistake:
 
 ```go
+type MyError struct{ msg string }
+
+func (e *MyError) Error() string { return e.msg }
+
 func doSomething() error {
 	var e *MyError // nil pointer
 	return e       // returns interface holding (type=*MyError, value=nil)
@@ -461,19 +586,21 @@ func doSomething() error {
 
 err := doSomething()
 if err != nil { // true! The interface is not nil.
-	fmt.Println("Error:", err) // "Error: <nil>"
+	fmt.Printf("err != nil, and it holds %T\n", err) // err != nil, and it holds *main.MyError
 }
 ```
 
 The interface value is *not* nil because it holds a type (`*MyError`). This trips up beginners constantly. The fix is to return `nil` explicitly:
 
 ```go
-func doSomething() error {
-	if everything_ok {
+func doSomething(ok bool) error {
+	if ok {
 		return nil // explicit nil
 	}
 	return fmt.Errorf("something went wrong")
 }
+
+fmt.Println(doSomething(true) == nil) // true
 ```
 
 Or, design your error types so the zero value is never valid:
@@ -489,6 +616,9 @@ func (e *MyError) Error() string {
 }
 
 // Zero value MyError{} is not meaningful, so it's unlikely to escape.
+
+var err error = &MyError{Code: 404, Message: "not found"}
+fmt.Println(err) // code 404: not found
 ```
 
 ### Compile-Time Assertions
@@ -496,32 +626,54 @@ func (e *MyError) Error() string {
 You can assert at compile time that a type implements an interface using a blank identifier:
 
 ```go
+type MyType struct{}
+
+func (*MyType) Read(p []byte) (int, error) { return 0, io.EOF }
+
+type MyValue struct{}
+
+func (MyValue) String() string { return "my value" }
+
 var _ io.Reader = (*MyType)(nil)
 var _ fmt.Stringer = MyValue{}
+
+fmt.Println(MyValue{}) // compiles, so both assertions hold: my value
 ```
 
-The compiler checks whether `*MyType` has all the methods of `io.Reader`. If not, the assignment fails and the code won't compile. This is a cheap way to catch interface violations early:
+The compiler checks whether `*MyType` has all the methods of `io.Reader`. If not, the assignment fails and the code won't compile. This is a cheap way to catch interface violations early. Here `ConsoleLogger` forgot `Logf`; run it to read the compiler's error:
 
-```go
+```go expect=compile-error
 type Logger interface {
 	Log(msg string)
-	Logf(format string, args ...interface{})
+	Logf(format string, args ...any)
 }
 
 type ConsoleLogger struct{}
 
-// Missing Logf; this fails at compile time
-var _ Logger = ConsoleLogger{}
-
-// Use a pointer?
-var _ Logger = (*ConsoleLogger)(nil) // also fails if ConsoleLogger has no methods
-
-// Implement the methods with a pointer receiver
 func (l *ConsoleLogger) Log(msg string) { fmt.Println(msg) }
-func (l *ConsoleLogger) Logf(fmt string, args ...interface{}) { }
+
+// Missing Logf: this line fails to compile, naming the missing method
+var _ Logger = (*ConsoleLogger)(nil)
+```
+
+Add the missing method and the assertion compiles. Note that the assertion uses `(*ConsoleLogger)(nil)`: the methods have pointer receivers, so only `*ConsoleLogger` is a `Logger`. `var _ Logger = ConsoleLogger{}` would still fail.
+
+```go
+type Logger interface {
+	Log(msg string)
+	Logf(format string, args ...any)
+}
+
+type ConsoleLogger struct{}
+
+func (l *ConsoleLogger) Log(msg string)                 { fmt.Println(msg) }
+func (l *ConsoleLogger) Logf(format string, args ...any) { fmt.Printf(format+"\n", args...) }
 
 // Now this succeeds
 var _ Logger = (*ConsoleLogger)(nil)
+
+var log Logger = &ConsoleLogger{}
+log.Logf("%d methods, all present", 2)
 ```
 
 ### Constructors and the "New" Convention
@@ -537,17 +689,28 @@ type Server struct {
 func NewServer(host string, port int) *Server {
 	return &Server{host: host, port: port}
 }
+
+s := NewServer("localhost", 8080)
+fmt.Printf("%+v\n", *s) // {host:localhost port:8080}
 ```
 
 The constructor is typically named `New<TypeName>`. It should validate inputs and return a properly initialized value. For errors, return a tuple:
 
 ```go
+type Server struct {
+	host string
+	port int
+}
+
 func NewServer(host string, port int) (*Server, error) {
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("invalid port %d", port)
 	}
 	return &Server{host: host, port: port}, nil
 }
+
+_, err := NewServer("localhost", 70000)
+fmt.Println(err) // invalid port 70000
 ```
 
 ### Functional Options Pattern
@@ -608,6 +771,11 @@ func New(host string, opts ...Option) (*Server, error) {
 
 // Usage
 srv, err := New("localhost", WithPort(9000), WithReadTimeout(3*time.Second))
+
+fmt.Println(srv.port, srv.readTimeout, srv.writeTimeout, srv.maxConns, err) // 9000 3s 10s 100 <nil>: options applied, defaults kept
+
+_, err = New("localhost", WithPort(70000))
+fmt.Println(err) // invalid option: invalid port 70000
 ```
 
 This pattern gives you:
@@ -622,16 +790,17 @@ In Go 1.21+, use `slices.SortFunc` (from the `slices` package) to sort with a cu
 
 ```go
 type Product struct {
-	Name string
+	Name  string
 	Price int
 }
 
-products := []Product{...}
+products := []Product{{"pen", 3}, {"book", 12}, {"mug", 8}}
 
 // Sort by price, ascending
 slices.SortFunc(products, func(a, b Product) int {
 	return cmp.Compare(a.Price, b.Price)
 })
+fmt.Println(products) // [{pen 3} {mug 8} {book 12}]
 ```
 
 The comparison function takes two elements and returns:
@@ -639,68 +808,122 @@ The comparison function takes two elements and returns:
 - 0 if they're equal.
 - A positive number if the first should come after the second.
 
-The `cmp.Compare` function (from `math/cmp`, Go 1.21+) implements this for ordered types.
+The `cmp.Compare` function (from package `cmp`, Go 1.21+) implements this for ordered types.
 
 For descending order, negate the result:
 
 ```go
+type Product struct {
+	Name  string
+	Price int
+}
+
+products := []Product{{"pen", 3}, {"book", 12}, {"mug", 8}}
 slices.SortFunc(products, func(a, b Product) int {
-	return -cmp.Compare(a.Price, b.Price)
+	return -cmp.Compare(a.Price, b.Price) // or cmp.Compare(b.Price, a.Price)
 })
+fmt.Println(products) // [{book 12} {mug 8} {pen 3}]
 ```
 
 For stable sorting (preserving the relative order of equal elements), use `slices.SortStableFunc`.
 
-The older `sort.Slice` requires defining a type with `Len`, `Less`, and `Swap` methods. It's more verbose and less common in modern Go. Prefer `slices.SortFunc`.
+The older `sort.Slice` takes a `less(i, j int) bool` func over indices and works through reflection, and `sort.Sort` needs a type with `Len`, `Less`, and `Swap` methods. Both are more verbose and slower. Prefer `slices.SortFunc`.
 
 ## Idioms & Best Practices
 
 - **Accept interfaces, return concrete types:** functions should accept interface parameters (for flexibility) but return concrete types (so callers can call more methods without a type assertion). The exception is `error`.
   ```go
-  // Good
-  func Read(r io.Reader) ([]byte, error) { ... }
-  // Returns []byte, not io.Reader; callers can index it.
-  
-  // Bad
-  func Read(filename string) io.Reader { ... }
-  // Returns an interface; callers can only call Read and Close, nothing else.
+  // Good: accepts any io.Reader, returns a concrete []byte
+  func ReadAll(r io.Reader) ([]byte, error) { return io.ReadAll(r) }
+
+  // Bad: takes a filename (can't pass a buffer in a test) and returns an
+  // interface (callers can only call Read).
+  func OpenFile(filename string) io.Reader {
+  	f, _ := os.Open(filename)
+  	return f
+  }
+
+  b, _ := ReadAll(strings.NewReader("abc"))
+  fmt.Println(b[0], len(b)) // 97 3: callers can index it
+  _ = OpenFile
   ```
 
 - **Avoid interface{} (any):** use `any` (a synonym for `interface{}`) sparingly. It says nothing and often hides bugs. Prefer concrete types or concrete interfaces.
   ```go
-  // Bad
-  func Process(v any) { ... }
-  
-  // Better
-  func Process(r io.Reader) { ... }
+  // Bad: anything goes; mistakes surface at run time
+  func ProcessAny(v any) {
+  	if r, ok := v.(io.Reader); ok {
+  		io.Copy(io.Discard, r)
+  	}
+  }
+
+  // Better: the compiler checks callers
+  func Process(r io.Reader) {
+  	n, _ := io.Copy(io.Discard, r)
+  	fmt.Println("processed", n, "bytes")
+  }
+
+  ProcessAny(42) // compiles, silently does nothing
+  Process(strings.NewReader("hello"))
   ```
 
 - **Don't use pointers to interfaces:** it's almost never the right thing. Interfaces are already reference types; a pointer to an interface is usually a mistake.
   ```go
-  // Bad
-  func Setup(w *io.Writer) { ... }
-  
-  // Good
-  func Setup(w io.Writer) { ... }
+  // Bad: a pointer to an interface
+  func SetupPtr(w *io.Writer) { fmt.Fprintln(*w, "setup (ptr)") }
+
+  // Good: the interface value already refers to the writer
+  func Setup(w io.Writer) { fmt.Fprintln(w, "setup") }
+
+  var w io.Writer = os.Stdout
+  SetupPtr(&w) // awkward at every call site
+  Setup(os.Stdout)
   ```
 
 - **Consistent receiver types:** if any method of a type uses a pointer receiver, all should. This prevents confusion and matches Go conventions.
   ```go
-  type Cache struct { mu sync.Mutex; items map[string]string }
-  
+  type Cache struct {
+  	mu    sync.Mutex
+  	items map[string]string
+  }
+
   // All pointer receivers
-  func (c *Cache) Get(key string) string { ... }
-  func (c *Cache) Set(key, value string) { ... }
+  func (c *Cache) Get(key string) string {
+  	c.mu.Lock()
+  	defer c.mu.Unlock()
+  	return c.items[key]
+  }
+
+  func (c *Cache) Set(key, value string) {
+  	c.mu.Lock()
+  	defer c.mu.Unlock()
+  	if c.items == nil {
+  		c.items = make(map[string]string)
+  	}
+  	c.items[key] = value
+  }
+
+  var c Cache
+  c.Set("lang", "go")
+  fmt.Println(c.Get("lang")) // go
   ```
 
 - **Embed unexported types with care:** if you expose a struct, think twice before embedding another struct. It couples you to that struct's API. Often a named field is cleaner.
   ```go
-  // Bad: exposes *sql.DB's methods
-  type UserDB struct { *sql.DB }
-  
+  type DB struct{} // stands in for *sql.DB
+
+  func (*DB) Exec(q string) {}
+
+  // Bad: exposes DB's methods
+  type LeakyUserDB struct{ *DB }
+
   // Good: hides the implementation
-  type UserDB struct { db *sql.DB }
-  func (u *UserDB) GetUser(id int) { ... }
+  type UserDB struct{ db *DB }
+
+  func (u *UserDB) GetUser(id int) string { return fmt.Sprint("user ", id) }
+
+  LeakyUserDB{&DB{}}.Exec("DROP TABLE users") // allowed!
+  fmt.Println((&UserDB{&DB{}}).GetUser(1))
   ```
 
 - **Use the zero value:** design types so their zero value is useful. `var mu sync.Mutex` works; `var sb strings.Builder` works. If the zero value is broken, the type is hard to use.
@@ -709,10 +932,17 @@ The older `sort.Slice` requires defining a type with `Len`, `Less`, and `Swap` m
 
 - **Copy mutable arguments and results:** if a method takes or returns a slice or map, decide whether callers own it or you do. If you own it, make a copy or document the ownership rules clearly.
   ```go
+  type Cache struct{ keys []string }
+
   // Good: caller is guaranteed not to affect internal state
   func (c *Cache) Keys() []string {
   	return slices.Clone(c.keys) // copy
   }
+
+  c := &Cache{keys: []string{"a", "b"}}
+  k := c.Keys()
+  k[0] = "changed"
+  fmt.Println(c.keys) // [a b]
   ```
 
 ## Common Pitfalls

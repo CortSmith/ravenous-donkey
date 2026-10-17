@@ -13,18 +13,25 @@ The key design insight is using `context.WithTimeout` for **each check separatel
 
 **Example structure:**
 ```go
+import "gocourse/solutions/08-http/exercises/health"
+
+type (
+	Check    = health.Check
+	Response = health.Response
+)
+
 func Handler(timeout time.Duration, checks map[string]Check) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         resp := Response{
             Status: "ok",
             Checks: make(map[string]string, len(checks)),
         }
-        
+
         for name, check := range checks {
             ctx, cancel := context.WithTimeout(r.Context(), timeout)
             err := check(ctx)
             cancel() // Release the timer immediately
-            
+
             if err != nil {
                 resp.Status = "fail"
                 resp.Checks[name] = err.Error()
@@ -32,17 +39,27 @@ func Handler(timeout time.Duration, checks map[string]Check) http.Handler {
                 resp.Checks[name] = "ok"
             }
         }
-        
+
         status := http.StatusOK
         if resp.Status == "fail" {
             status = http.StatusServiceUnavailable
         }
-        
+
         w.Header().Set("Content-Type", "application/json")
         w.Header().Set("Cache-Control", "no-store")
         w.WriteHeader(status)
         json.NewEncoder(w).Encode(resp)
     })
+}
+
+func main() {
+	checks := map[string]Check{
+		"db":    func(ctx context.Context) error { return nil },
+		"cache": func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }, // hangs until the timeout
+	}
+	rec := httptest.NewRecorder()
+	Handler(50*time.Millisecond, checks).ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	fmt.Print(rec.Code, " ", rec.Body.String()) // 503 {"status":"fail","checks":{"cache":"context deadline exceeded","db":"ok"}}
 }
 ```
 
@@ -353,8 +370,18 @@ A well-behaved HTTP client with three methods:
    - Calls c.http.Do(req)
    - **Always drains the body** even on error (crucial for connection reuse)
      ```go
+     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+     	fmt.Fprint(w, "a body nobody reads")
+     }))
+     defer srv.Close()
+
+     resp, err := http.Get(srv.URL)
+     if err != nil {
+     	log.Fatal(err)
+     }
      defer resp.Body.Close()
-     defer io.Copy(io.Discard, resp.Body) // drain to allow reuse
+     defer io.Copy(io.Discard, resp.Body) // drain to allow reuse (deferred calls run last-in, first-out: drain, then close)
+     fmt.Println(resp.StatusCode)
      ```
    - Checks StatusCode explicitly (404 → ErrNotFound; others → StatusError)
    - Reads body on error for error message (only if small enough)
@@ -367,10 +394,29 @@ A well-behaved HTTP client with three methods:
 
 **Key insight for typed errors**: ErrNotFound is a sentinel value, so callers can use:
 ```go
-item, err := c.GetItem(ctx, id)
-if errors.Is(err, ErrNotFound) {
-    http.Error(w, "item not found", http.StatusNotFound)
-    return
+import "gocourse/solutions/08-http/exercises/client"
+
+var ErrNotFound = client.ErrNotFound
+
+func main() {
+	api := httptest.NewServer(http.NotFoundHandler()) // an API that has no items
+	defer api.Close()
+	c := client.New(api.URL, time.Second)
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		ctx, id := r.Context(), r.PathValue("id")
+		item, err := c.GetItem(ctx, id)
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "item not found", http.StatusNotFound)
+			return
+		}
+		fmt.Fprintln(w, item)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /items/{id}", handler)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/items/7", nil))
+	fmt.Print(rec.Code, " ", rec.Body.String()) // 404 item not found
 }
 ```
 This is better than checking error messages (fragile) or error types (verbose).
@@ -470,10 +516,23 @@ The project implements a complete URL-shortener HTTP API with three main compone
 
 7. **Store interface and MemoryStore**:
    ```go
+   import "gocourse/solutions/08-http/project/shortener"
+
+   type Link = shortener.Link
+
    type Store interface {
-       Create(ctx context.Context, l Link) error  // returns ErrExists if taken
-       Get(ctx context.Context, code string) (Link, error)
-       Visit(ctx context.Context, code string) (Link, error)  // increments visits
+   	Create(ctx context.Context, l Link) error // returns ErrExists if taken
+   	Get(ctx context.Context, code string) (Link, error)
+   	Visit(ctx context.Context, code string) (Link, error) // increments visits
+   }
+
+   func main() {
+   	var s Store = shortener.NewMemoryStore()
+   	ctx := context.Background()
+   	s.Create(ctx, Link{Code: "go", URL: "https://go.dev"})
+   	fmt.Println(s.Create(ctx, Link{Code: "go"})) // the code is taken: ErrExists
+   	l, _ := s.Visit(ctx, "go")
+   	fmt.Println(l.Visits) // 1
    }
    ```
    - MemoryStore uses sync.RWMutex to protect links map

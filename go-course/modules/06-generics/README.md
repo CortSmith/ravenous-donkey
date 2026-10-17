@@ -42,14 +42,44 @@ three options, all bad:
 
 ```go
 // 1. Copy and paste.
-func SumInts(xs []int) int           { ... }
-func SumFloats(xs []float64) float64 { ... }
+func SumInts(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+func SumFloats(xs []float64) float64 { // the same body again, with float64
+	total := 0.0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
 
 // 2. interface{} plus type assertions: no compile-time safety, allocations for boxing.
-func Sum(xs []interface{}) interface{} { ... }
+func SumAny(xs []interface{}) interface{} {
+	total := 0
+	for _, x := range xs {
+		total += x.(int) // panics on anything that isn't an int
+	}
+	return total
+}
 
 // 3. Reflection: slow, and errors appear at run time.
-func Sum(xs interface{}) interface{} { v := reflect.ValueOf(xs); ... }
+func SumReflect(xs interface{}) interface{} {
+	v := reflect.ValueOf(xs)
+	total := 0.0
+	for i := range v.Len() {
+		total += v.Index(i).Convert(reflect.TypeOf(0.0)).Float()
+	}
+	return total
+}
+
+fmt.Println(SumInts([]int{1, 2}), SumFloats([]float64{1.5}))
+fmt.Println(SumAny([]interface{}{1, 2}))      // 3, but SumAny([]interface{}{"x"}) would panic
+fmt.Println(SumReflect([]int{1, 2, 3}))       // 6, as a float64 inside an interface{}
 ```
 
 A **type parameter** lets you write the function once and have the compiler check
@@ -64,17 +94,25 @@ func Sum[T int | float64](xs []T) T {
 	return total
 }
 
-Sum([]int{1, 2, 3})      // 6, T = int
-Sum([]float64{1.5, 2.5}) // 4, T = float64
-Sum([]string{"a"})       // compile error: string does not satisfy int | float64
+fmt.Println(Sum([]int{1, 2, 3}))      // 6, T = int
+fmt.Println(Sum([]float64{1.5, 2.5})) // 4, T = float64
+// Sum([]string{"a"})                 // compile error: string does not satisfy int | float64 (uncomment to see)
 ```
 
 ### 2.2 Anatomy of a type parameter list
 
 ```go
-func Map[S ~[]E, E, R any](s S, f func(E) R) []R
-//      └──────┬───────┘
-//   type parameters, each with a constraint
+func Map[S ~[]E, E, R any](s S, f func(E) R) []R {
+	//  └──────┬───────┘
+	//   type parameters, each with a constraint
+	out := make([]R, 0, len(s))
+	for _, v := range s {
+		out = append(out, f(v))
+	}
+	return out
+}
+
+fmt.Printf("%q\n", Map([]int{1, 2, 3}, strconv.Itoa)) // ["1" "2" "3"]
 ```
 
 - The list sits in **square brackets** between the name and the ordinary parameters.
@@ -103,6 +141,18 @@ type Integer interface {
 type Float interface{ ~float32 | ~float64 }
 
 type Number interface{ Integer | Float } // the union of two type sets
+
+func Sum[T Number](xs ...T) T {
+	var total T
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+type Celsius float64
+
+fmt.Println(Sum(1, 2, 3), Sum[uint8](200, 50), Sum(Celsius(1.5), 2)) // 6 250 3.5
 ```
 
 The constraint does two jobs at once:
@@ -116,7 +166,9 @@ The constraint does two jobs at once:
 Interfaces with type elements (`int | float64`, `~string`) are **constraints only**.
 You can't declare a variable of such a type:
 
-```go
+```go expect=compile-error
+type Number interface{ ~int | ~float64 }
+
 var n Number // cannot use type Number outside a type constraint: interface contains type constraints
 ```
 
@@ -131,7 +183,7 @@ var n Number // cannot use type Number outside a type constraint: interface cont
 
 Try `==` under `any` and you get:
 
-```go
+```go expect=compile-error
 func Eq[T any](a, b T) bool { return a == b }
 // invalid operation: a == b (incomparable types in type set)
 ```
@@ -149,13 +201,21 @@ Go programs are full of named types: `type Celsius float64`,
 `type Duration int64`, `type UserID string`. Without the `~`, a constraint matches
 **only** the exact type:
 
-```go
+```go expect=compile-error
 type Celsius float64
 
-func Sum[T int | float64](xs ...T) T { ... }
+func Sum[T int | float64](xs ...T) T {
+	var total T
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
 
-Sum(Celsius(1), Celsius(2))
-// Celsius does not satisfy int | float64 (possibly missing ~ for float64 in int | float64)
+func main() {
+	Sum(Celsius(1), Celsius(2))
+	// Celsius does not satisfy int | float64 (possibly missing ~ for float64 in int | float64)
+}
 ```
 
 `~float64` means "any type whose *underlying type* is `float64`", which includes
@@ -168,17 +228,27 @@ You almost never write type arguments, because the compiler infers them from the
 ordinary arguments:
 
 ```go
-Map([]int{1, 2}, strconv.Itoa) // S=[]int, E=int (from S ~[]E), R=string (from f)
+func Map[S ~[]E, E, R any](s S, f func(E) R) []R {
+	out := make([]R, 0, len(s))
+	for _, v := range s {
+		out = append(out, f(v))
+	}
+	return out
+}
+
+fmt.Printf("%q\n", Map([]int{1, 2}, strconv.Itoa)) // S=[]int, E=int (from S ~[]E), R=string (from f)
 ```
 
 Inference fails when a type parameter appears **only in the result** or in nothing at
 all:
 
-```go
+```go expect=compile-error
 func Zero[T any]() T { var z T; return z }
 
-Zero()      // in call to Zero, cannot infer T
-Zero[int]() // fine
+func main() {
+	_ = Zero[int]() // fine
+	_ = Zero()      // in call to Zero, cannot infer T
+}
 ```
 
 This is why constructors of generic containers need explicit type arguments:
@@ -194,20 +264,68 @@ type parameters so that the ones callers must spell out come first.
 Compare two signatures for `Filter`:
 
 ```go
-func Filter1[E any](s []E, keep func(E) bool) []E
-func Filter2[S ~[]E, E any](s S, keep func(E) bool) S
+func Filter1[E any](s []E, keep func(E) bool) []E {
+	var out []E
+	for _, v := range s {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func Filter2[S ~[]E, E any](s S, keep func(E) bool) S {
+	var out S
+	for _, v := range s {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+type Names []string
+
+names := Names{"ada", "bob", "al"}
+short := func(s string) bool { return len(s) <= 2 }
+fmt.Printf("%T %T\n", Filter1(names, short), Filter2(names, short)) // []string main.Names
 ```
 
 Both accept a `Names` (where `type Names []string`). Only `Filter2` **returns** a
 `Names`. `Filter1` returns a plain `[]string`, so the caller loses the named type and
 any methods declared on it:
 
-```go
+```go expect=compile-error
+func Filter1[E any](s []E, keep func(E) bool) []E {
+	var out []E
+	for _, v := range s {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func Filter2[S ~[]E, E any](s S, keep func(E) bool) S {
+	var out S
+	for _, v := range s {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 type Names []string
+
 func (n Names) Join() string { return strings.Join(n, ", ") }
 
-Filter1(names, keep).Join() // compile error: []string has no method Join
-Filter2(names, keep).Join() // ok
+func main() {
+	names := Names{"ada", "bob", "al"}
+	keep := func(s string) bool { return strings.HasPrefix(s, "a") }
+	fmt.Println(Filter2(names, keep).Join()) // ok
+	fmt.Println(Filter1(names, keep).Join()) // compile error: []string has no method Join
+}
 ```
 
 Every function in the `slices` package uses this pattern for that reason. Use it
@@ -238,6 +356,13 @@ func (s *Stack[T]) Pop() (T, bool) {
 
 var s Stack[string] // instantiate when you name the type
 s.Push("hi")
+
+s.Push("there")
+v, ok := s.Pop()
+fmt.Println(v, ok) // there true
+v, ok = s.Pop()
+v2, ok2 := s.Pop() // empty: the zero value of string, and false
+fmt.Printf("%s %v %q %v\n", v, ok, v2, ok2) // hi true "" false
 ```
 
 Things to notice:
@@ -296,10 +421,13 @@ the types differ.
 ```go
 // BAD: a type parameter whose only use is to call a method. An interface does the
 // same thing, more simply, and the caller can pass any io.Writer at run time.
-func WriteAll[W io.Writer](w W, data []byte) error { _, err := w.Write(data); return err }
+func WriteAllGeneric[W io.Writer](w W, data []byte) error { _, err := w.Write(data); return err }
 
 // GOOD
 func WriteAll(w io.Writer, data []byte) error { _, err := w.Write(data); return err }
+
+WriteAllGeneric(os.Stdout, []byte("same result\n"))
+WriteAll(os.Stdout, []byte("same result\n"))
 ```
 
 - **You only call methods on the value.** Use an interface.
@@ -318,10 +446,35 @@ func WriteAll(w io.Writer, data []byte) error { _, err := w.Write(data); return 
 An iterator is just a function that takes a `yield` callback:
 
 ```go
-package iter
+// From package iter (Go 1.23):
+//
+//	type Seq[V any] func(yield func(V) bool)
+//	type Seq2[K, V any] func(yield func(K, V) bool)
+//
+// Any function with that shape is an iterator:
+var letters iter.Seq[string] = func(yield func(string) bool) {
+	for _, s := range []string{"a", "b", "c"} {
+		if !yield(s) {
+			return
+		}
+	}
+}
 
-type Seq[V any] func(yield func(V) bool)
-type Seq2[K, V any] func(yield func(K, V) bool)
+var indexed iter.Seq2[int, string] = func(yield func(int, string) bool) {
+	for i, s := range []string{"x", "y"} {
+		if !yield(i, s) {
+			return
+		}
+	}
+}
+
+for s := range letters {
+	fmt.Print(s, " ") // a b c
+}
+for i, s := range indexed {
+	fmt.Print(i, s, " ") // 0x 1y
+}
+fmt.Println()
 ```
 
 The iterator calls `yield` once per element. `yield` returns `false` when the consumer
@@ -359,7 +512,7 @@ completes the return once the iterator has returned.
 
 Break that rule and the program panics at run time:
 
-```go
+```go expect=runtime-error
 func bad() iter.Seq[int] {
 	return func(yield func(int) bool) {
 		for i := range 3 {
@@ -395,12 +548,27 @@ func Filter[T any](seq iter.Seq[T], keep func(T) bool) iter.Seq[T] {
 	}
 }
 
+// Naturals yields 0, 1, 2, ... forever.
+func Naturals() iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := 0; ; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+func isEven(n int) bool { return n%2 == 0 }
+
 // Even numbers from an infinite source: fine, because the consumer stops.
 for v := range Filter(Naturals(), isEven) {
 	if v > 10 {
 		break
 	}
+	fmt.Print(v, " ") // 0 2 4 6 8 10
 }
+fmt.Println()
 ```
 
 When the outer consumer breaks, `yield` returns false in `Filter`. `Filter` returns
@@ -414,18 +582,35 @@ state (counters, cursors) **inside** the returned function, not in the enclosing
 
 ```go
 // BAD: the counter is shared by every range over the returned Seq.
-func Take[T any](seq iter.Seq[T], n int) iter.Seq[T] {
+func TakeBad[T any](seq iter.Seq[T], n int) iter.Seq[T] {
 	taken := 0
-	return func(yield func(T) bool) { ... taken++ ... }
+	return func(yield func(T) bool) {
+		for v := range seq {
+			if taken >= n || !yield(v) {
+				return
+			}
+			taken++
+		}
+	}
 }
 
 // GOOD: each range starts fresh.
 func Take[T any](seq iter.Seq[T], n int) iter.Seq[T] {
 	return func(yield func(T) bool) {
 		taken := 0
-		...
+		for v := range seq {
+			if taken >= n || !yield(v) {
+				return
+			}
+			taken++
+		}
 	}
 }
+
+abc := slices.Values([]string{"a", "b", "c"})
+bad, good := TakeBad(abc, 2), Take(abc, 2)
+fmt.Println(slices.Collect(bad), slices.Collect(bad))   // [a b] []: the second range gets nothing
+fmt.Println(slices.Collect(good), slices.Collect(good)) // [a b] [a b]
 ```
 
 Some sequences are inherently single-use, such as one that reads from a network
@@ -437,16 +622,21 @@ Sometimes you need to drive the iteration yourself, for example to walk two
 sequences in lockstep. `iter.Pull` converts a push iterator into a `next` function:
 
 ```go
+seq := slices.Values([]string{"a", "b", "c"})
+other := slices.Values([]int{1, 2, 3})
+
 next, stop := iter.Pull(seq)
 defer stop() // always: releases the iterator's resources
 
-for {
+// Walk two sequences in lockstep: pull from seq while ranging over other.
+for n := range other {
 	v, ok := next()
 	if !ok {
 		break
 	}
-	...
+	fmt.Print(v, n, " ") // a1 b2 c3
 }
+fmt.Println()
 ```
 
 `Pull` runs the iterator in a separate coroutine, so it costs much more than ranging
@@ -519,22 +709,49 @@ You'll meet these in newer codebases. Don't use them in this course.
 - **Start concrete, generalise on the second copy.**
   ```go
   // BAD: designed generic up front for one caller
-  type Repository[T Entity, ID comparable, Q Query[T]] interface { ... }
+  //
+  //	type Repository[T Entity, ID comparable, Q Query[T]] interface { ... }
+  //
   // GOOD: write UserStore. Make it generic if a second store turns out to be identical.
+  type User struct{ ID, Name string }
+
+  type UserStore struct{ users map[string]User }
+
+  func (s *UserStore) Get(id string) (User, bool) { u, ok := s.users[id]; return u, ok }
+
+  s := &UserStore{users: map[string]User{"1": {"1", "Ada"}}}
+  fmt.Println(s.Get("1"))
   ```
 
 - **Prefer the standard library's generic helpers to your own.**
   ```go
+  xs, v := []string{"go", "rust"}, "go"
+
   // BAD
-  func Contains[T comparable](xs []T, v T) bool { for ... }
+  func Contains[T comparable](xs []T, v T) bool {
+  	for _, x := range xs {
+  		if x == v {
+  			return true
+  		}
+  	}
+  	return false
+  }
+
+  fmt.Println(Contains(xs, v))
   // GOOD
-  slices.Contains(xs, v)
+  fmt.Println(slices.Contains(xs, v))
   ```
 
 - **Use `~` in your own unions.**
   ```go
-  type Number interface{ int | float64 }   // BAD: rejects time.Duration, Celsius, ...
-  type Number interface{ ~int | ~float64 } // GOOD
+  type NumberBad interface{ int | int64 | float64 } // BAD: rejects time.Duration, Celsius, ...
+  type Number interface{ ~int | ~int64 | ~float64 } // GOOD
+
+  func Double[T Number](x T) T { return x * 2 }
+
+  type Celsius float64
+
+  fmt.Println(Double(Celsius(21.5)), Double(3*time.Second)) // 43 6s
   ```
 
 - **Use the weakest constraint that compiles.** `any` < `comparable` < `cmp.Ordered`.
@@ -543,13 +760,49 @@ You'll meet these in newer codebases. Don't use them in this course.
 - **Pass a function instead of requiring a method or a stronger constraint.** That's
   why `slices.SortFunc` exists alongside `slices.Sort`.
   ```go
-  func MaxBy[T any](xs []T, less func(a, b T) bool) T // works for any T
+  func MaxBy[T any](xs []T, less func(a, b T) bool) T { // works for any T
+  	best := xs[0]
+  	for _, x := range xs[1:] {
+  		if less(best, x) {
+  			best = x
+  		}
+  	}
+  	return best
+  }
+
+  type point struct{ X, Y int } // not ordered: no < on structs
+  far := MaxBy([]point{{1, 1}, {3, 4}, {2, 2}}, func(a, b point) bool {
+  	return a.X*a.X+a.Y*a.Y < b.X*b.X+b.Y*b.Y
+  })
+  fmt.Println(far) // {3 4}
   ```
 
 - **Return the caller's slice type with `S ~[]E`.**
   ```go
-  func Filter[E any](s []E, f func(E) bool) []E        // loses named types
-  func Filter[S ~[]E, E any](s S, f func(E) bool) S    // GOOD
+  func FilterLoose[E any](s []E, f func(E) bool) []E { // loses named types
+  	var out []E
+  	for _, v := range s {
+  		if f(v) {
+  			out = append(out, v)
+  		}
+  	}
+  	return out
+  }
+
+  func Filter[S ~[]E, E any](s S, f func(E) bool) S { // GOOD
+  	var out S
+  	for _, v := range s {
+  		if f(v) {
+  			out = append(out, v)
+  		}
+  	}
+  	return out
+  }
+
+  type IDs []int
+  ids := IDs{1, 2, 3}
+  odd := func(n int) bool { return n%2 == 1 }
+  fmt.Printf("%T %T\n", FilterLoose(ids, odd), Filter(ids, odd)) // []int main.IDs
   ```
 
 - **Make the zero value of generic containers useful.** Lazily `make` the map in `Add`
@@ -557,8 +810,27 @@ You'll meet these in newer codebases. Don't use them in this course.
 
 - **Clear vacated slots in containers.**
   ```go
-  s.items = s.items[:len(s.items)-1]                           // BAD: old value still referenced
-  s.items[last] = zero; s.items = s.items[:last]               // GOOD
+  type Stack[T any] struct{ items []T }
+
+  func (s *Stack[T]) PopLeaky() T {
+  	v := s.items[len(s.items)-1]
+  	s.items = s.items[:len(s.items)-1] // BAD: old value still referenced
+  	return v
+  }
+
+  func (s *Stack[T]) Pop() T {
+  	last := len(s.items) - 1
+  	v := s.items[last]
+  	var zero T
+  	s.items[last] = zero; s.items = s.items[:last] // GOOD
+  	return v
+  }
+
+  big := &Stack[*[1 << 20]byte]{}
+  big.items = append(big.items, new([1 << 20]byte), new([1 << 20]byte))
+  big.PopLeaky()
+  big.Pop()
+  fmt.Println(big.items[:2][1] != nil, big.items[:2][0] != nil) // true false: PopLeaky kept 1 MiB alive
   ```
 
 - **Iterators: check `yield`'s result every time.** `if !yield(v) { return }`.
@@ -588,7 +860,7 @@ You'll meet these in newer codebases. Don't use them in this course.
 3. **`comparable` is satisfied by interface types, and `==` on them can panic.** Since
    Go 1.20, `any` satisfies `comparable` ([blog](https://go.dev/blog/comparable)). So
    this compiles, and panics at run time:
-   ```go
+   ```go expect=runtime-error
    func Eq[T comparable](a, b T) bool { return a == b }
    var x, y any = []int{1}, []int{1}
    Eq(x, y) // panic: runtime error: comparing uncomparable type []int

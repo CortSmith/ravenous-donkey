@@ -419,14 +419,33 @@ the real terminal, and `os.Exit` would kill the test process.
 The fix, used throughout this course, is to make `main` a two-line adapter
 and put the program in a function you can call:
 
-```go
-// cmd/envcheck/main.go
-func main() {
-	os.Exit(envcheck.Run(os.Args[1:], envcheck.DetectEnv(), os.Stdout, os.Stderr))
-}
-```
+In the project, `main` lives in `cmd/envcheck/main.go` and `Run` in
+`envcheck.go`. Here they share one file so you can run it. It imports *your*
+`hello` package, so the greeting stays empty until you finish that exercise.
 
 ```go
+import "gocourse/modules/00-setup/exercises/hello"
+
+// Env describes the machine. The project's Env has more fields.
+type Env struct{ GoVersion string }
+
+// cmd/envcheck/main.go is just:
+//
+//	func main() {
+//		os.Exit(envcheck.Run(os.Args[1:], envcheck.DetectEnv(), os.Stdout, os.Stderr))
+//	}
+//
+// This main calls Run the way a test would instead.
+func main() {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-name", "Ada"}, Env{}, &stdout, &stderr)
+	fmt.Printf("exit %d, stdout %q\n", code, stdout.String())
+
+	stdout.Reset()
+	code = Run([]string{"-bogus"}, Env{}, &stdout, &stderr)
+	fmt.Printf("exit %d, stderr starts %q\n", code, strings.SplitN(stderr.String(), "\n", 2)[0])
+}
+
 // envcheck.go
 func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("envcheck", flag.ContinueOnError) // return errors, don't exit

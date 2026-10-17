@@ -124,6 +124,25 @@ Together, they guarantee:
 - Tests can skip the janitor by never calling RunJanitor, or drive it manually with a fake clock.
 
 ```go
+var ErrNotFound = errors.New("not found")
+
+// Store is a minimal TTL store: just enough around the methods below.
+type Store struct {
+    mu    sync.RWMutex
+    items map[string]entry
+    now   func() time.Time
+}
+
+func (s *Store) Set(key, value string, ttl time.Duration) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    var exp time.Time
+    if ttl > 0 {
+        exp = s.now().Add(ttl)
+    }
+    s.items[key] = entry{value: value, expiresAt: exp}
+}
+
 // An entry with a TTL.
 type entry struct {
     value     string
@@ -173,6 +192,29 @@ func (s *Store) janitor(ctx context.Context, ticks <-chan time.Time) {
         }
     }
 }
+
+func main() {
+    now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+    s := &Store{items: map[string]entry{}, now: func() time.Time { return now }}
+    s.Set("session", "abc", time.Minute)
+    s.Set("config", "on", 0) // never expires
+
+    now = now.Add(2 * time.Minute) // time passes
+    _, err := s.Get("session")
+    fmt.Println(err)                      // not found: lazily expired on read
+    fmt.Println(len(s.items))             // 2: but still in memory...
+    fmt.Println(s.DeleteExpired())        // 1: ...until the janitor sweeps
+    fmt.Println(s.Get("config"))          // on <nil>
+
+    // Drive the janitor with a channel the test controls:
+    ctx, cancel := context.WithCancel(context.Background())
+    ticks := make(chan time.Time)
+    done := make(chan struct{})
+    go func() { s.janitor(ctx, ticks); close(done) }()
+    ticks <- now // one sweep
+    cancel()
+    <-done
+}
 ```
 
 **Testable Clocks:**
@@ -180,6 +222,10 @@ func (s *Store) janitor(ctx context.Context, ticks <-chan time.Time) {
 Never sleep in tests. Instead, inject a fake clock:
 
 ```go
+// The reference milestone 1 store, so the output means something.
+// Point the import at modules/10-capstone/milestone1/store to try yours.
+import "gocourse/solutions/10-capstone/milestone1/store"
+
 type fakeClock struct {
     mu  sync.Mutex
     now time.Time
@@ -197,12 +243,17 @@ func (c *fakeClock) Advance(d time.Duration) {
     c.now = c.now.Add(d)
 }
 
-// In tests:
-clk := &fakeClock{now: baseTime}
-s := store.New(store.WithClock(clk.Now))
-s.Set("key", "val", time.Second)
-clk.Advance(time.Second)  // key is now expired
-// No sleep needed!
+func main() {
+    // In tests:
+    baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+    clk := &fakeClock{now: baseTime}
+    s := store.New(store.WithClock(clk.Now))
+    s.Set("key", "val", time.Second)
+    fmt.Println(s.Get("key")) // val <nil>
+    clk.Advance(time.Second)  // key is now expired
+    fmt.Println(s.Get("key")) // store: key not found
+    // No sleep needed!
+}
 ```
 
 ### Append-Only Logs and Durability
@@ -253,17 +304,28 @@ On Replay, we detect this:
 - Continue; the torn record was never acknowledged, so losing it is safe.
 
 ```go
+// A log whose last record was torn by a crash: no final '\n'.
+f, _ := os.CreateTemp("", "torn-*.log")
+defer os.Remove(f.Name())
+f.WriteString("{\"op\":\"set\",\"key\":\"a\"}\n{\"op\":\"set\",\"key\":\"b\"}\n{\"op\":\"set\",\"key\":\"k\",\"val")
+f.Seek(0, io.SeekStart)
+
+br := bufio.NewReader(f)
+var lastGoodOffset int64
 for {
     line, err := br.ReadBytes('\n')
     if err == io.EOF {
-        if len(line) > 0 {  // torn tail
-            l.f.Truncate(lastGoodOffset)
+        if len(line) > 0 { // torn tail
+            fmt.Printf("torn record: %q\n", line)
+            f.Truncate(lastGoodOffset)
         }
-        return nil
+        break
     }
-    // process line...
+    fmt.Printf("replay: %s", line) // process line...
     lastGoodOffset += int64(len(line))
 }
+info, _ := f.Stat()
+fmt.Println("file size now", info.Size(), "=", lastGoodOffset)
 ```
 
 **Compaction:**
@@ -278,19 +340,77 @@ Over time, the log grows with deletes and rewrites. Compaction shrinks it:
 6. Reopen the log with O_APPEND.
 
 ```go
+type Record struct {
+    Op  string `json:"op"`
+    Key string `json:"key"`
+}
+
+type Log struct {
+    path string
+    f    *os.File
+}
+
 func (l *Log) Compact(records []Record) error {
-    // Write to temp file
+    dir := filepath.Dir(l.path)
+
+    // Write to temp file (same directory, so the rename stays on one filesystem)
     tmp, err := os.CreateTemp(dir, "compact-*")
-    // ... write all records ...
-    tmp.Sync()   // durable on disk
-    tmp.Close()
-    
-    os.Rename(tmp.Name(), l.path)  // atomic
-    syncDir(dir)                   // make rename durable
-    
+    if err != nil {
+        return err
+    }
+    defer os.Remove(tmp.Name()) // no-op after a successful rename
+    enc := json.NewEncoder(tmp)
+    for _, r := range records {
+        if err := enc.Encode(r); err != nil {
+            tmp.Close()
+            return err
+        }
+    }
+    if err := tmp.Sync(); err != nil { // durable on disk
+        tmp.Close()
+        return err
+    }
+    if err := tmp.Close(); err != nil {
+        return err
+    }
+
+    if err := os.Rename(tmp.Name(), l.path); err != nil { // atomic
+        return err
+    }
+    if err := syncDir(dir); err != nil { // make rename durable
+        return err
+    }
+
     // Reopen with O_APPEND
-    f, _ := os.OpenFile(l.path, os.O_RDWR | os.O_APPEND, ...)
+    f, err := os.OpenFile(l.path, os.O_RDWR|os.O_APPEND, 0o644)
+    if err != nil {
+        return err
+    }
+    l.f.Close()
     l.f = f
+    return nil
+}
+
+func syncDir(dir string) error {
+    d, err := os.Open(dir)
+    if err != nil {
+        return err
+    }
+    defer d.Close()
+    return d.Sync()
+}
+
+func main() {
+    dir, _ := os.MkdirTemp("", "compact")
+    defer os.RemoveAll(dir)
+    path := filepath.Join(dir, "kv.log")
+    os.WriteFile(path, []byte("{\"op\":\"set\",\"key\":\"a\"}\n{\"op\":\"del\",\"key\":\"a\"}\n{\"op\":\"set\",\"key\":\"b\"}\n"), 0o644)
+    f, _ := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o644)
+    l := &Log{path: path, f: f}
+
+    fmt.Println(l.Compact([]Record{{Op: "set", Key: "b"}})) // <nil>
+    data, _ := os.ReadFile(path)
+    fmt.Print(string(data)) // only the live key is left
 }
 ```
 
@@ -305,20 +425,27 @@ mux := http.NewServeMux()
 
 // GET /kv/{key}: read
 mux.HandleFunc("GET /kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-    key := r.PathValue("key")
-    // ...
+	key := r.PathValue("key")
+	fmt.Fprintln(w, "read", key) // look the key up in the db
 })
 
 // PUT /kv/{key}: write
 mux.HandleFunc("PUT /kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-    // decode JSON body
-    // call db.Set
+	// decode JSON body, then call db.Set
+	fmt.Fprintln(w, "write", r.PathValue("key"))
 })
 
 // DELETE /kv/{key}: delete
 mux.HandleFunc("DELETE /kv/{key}", func(w http.ResponseWriter, r *http.Request) {
-    // call db.Delete
+	// call db.Delete
+	fmt.Fprintln(w, "delete", r.PathValue("key"))
 })
+
+for _, m := range []string{"GET", "PUT", "DELETE", "PATCH"} {
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(m, "/kv/user:1", nil))
+	fmt.Print(m, " ", rec.Code, " ", rec.Body.String()) // PATCH gets 405
+}
 ```
 
 **Request/Response:**
@@ -327,7 +454,7 @@ mux.HandleFunc("DELETE /kv/{key}", func(w http.ResponseWriter, r *http.Request) 
 // PUT request body
 type putRequest struct {
     Value string `json:"value"`
-    TTL   int64  `json:"ttl,omitempty"`  // milliseconds, optional
+    TTL   int64  `json:"ttl,omitempty"` // milliseconds, optional
 }
 
 // Success response
@@ -341,10 +468,29 @@ type errorResp struct {
     Error string `json:"error"`
 }
 
-// Set Content-Type and status, then Encode
-w.Header().Set("Content-Type", "application/json")
-w.WriteHeader(http.StatusOK)
-json.NewEncoder(w).Encode(putResp{...})
+func put(w http.ResponseWriter, r *http.Request) {
+    var req putRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(errorResp{Error: "invalid JSON"})
+        return
+    }
+    // Set Content-Type and status, then Encode
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(putResp{Key: r.PathValue("key"), Value: req.Value})
+}
+
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("PUT /kv/{key}", put)
+    for _, body := range []string{`{"value": "alice", "ttl": 5000}`, `{oops`} {
+        rec := httptest.NewRecorder()
+        mux.ServeHTTP(rec, httptest.NewRequest("PUT", "/kv/user:1", strings.NewReader(body)))
+        fmt.Print(rec.Code, " ", rec.Body.String())
+    }
+}
 ```
 
 This writes the status before encoding, which is fine for these small,
@@ -362,6 +508,9 @@ func main() {
     // SIGTERM is what docker stop, Kubernetes and systemd send, not just Ctrl-C.
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer stop()
+    // Demo only: pretend a SIGTERM arrives after 200ms, so this example ends.
+    ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+    defer cancel()
     if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
         fmt.Fprintln(os.Stderr, "kvd:", err)
         stop()
@@ -369,20 +518,31 @@ func main() {
     }
 }
 
-// inside run, after starting the server:
-serveErr := make(chan error, 1)
-go func() { serveErr <- srv.Serve(ln) }()
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+    ln, err := net.Listen("tcp", "127.0.0.1:0") // any free port
+    if err != nil {
+        return err
+    }
+    srv := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: 5 * time.Second}
+    fmt.Fprintln(stdout, "listening on", ln.Addr())
 
-select {
-case err := <-serveErr: // Serve failed by itself: don't wait for a signal forever
-    return fmt.Errorf("serve: %w", err)
-case <-ctx.Done(): // signal (or a test) asked us to stop
-}
+    // After starting the server:
+    serveErr := make(chan error, 1)
+    go func() { serveErr <- srv.Serve(ln) }()
 
-shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-if err := srv.Shutdown(shutdownCtx); err != nil { // stop accepting, drain in-flight requests
-    return fmt.Errorf("shutdown: %w", err)
+    select {
+    case err := <-serveErr: // Serve failed by itself: don't wait for a signal forever
+        return fmt.Errorf("serve: %w", err)
+    case <-ctx.Done(): // signal (or a test) asked us to stop
+    }
+
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := srv.Shutdown(shutdownCtx); err != nil { // stop accepting, drain in-flight requests
+        return fmt.Errorf("shutdown: %w", err)
+    }
+    fmt.Fprintln(stdout, "shut down cleanly")
+    return nil
 }
 ```
 
@@ -400,6 +560,9 @@ logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 }))
 
 logger.Info("server started", "addr", "127.0.0.1:8080")
+
+r := httptest.NewRequest("GET", "/kv/user:1", nil)
+key, err := "user:1", errors.New("disk read failed")
 logger.ErrorContext(r.Context(), "get failed", "key", key, "error", err)
 ```
 

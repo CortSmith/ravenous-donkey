@@ -41,6 +41,10 @@ type LogEntry struct {
     Bytes    int64         // response body size, 0 if "-"
     Latency  time.Duration // response time
 }
+
+ts, _ := time.Parse("02/Jan/2006:15:04:05 -0700", "11/Oct/2026:13:00:00 +0000")
+e := LogEntry{IP: "10.0.0.2", Timestamp: ts, Method: "GET", Path: "/api/items/7", Status: 200, Bytes: 1024, Latency: 34 * time.Millisecond}
+fmt.Printf("%+v\n", e)
 ```
 
 The timestamp format is: `02/Jan/2006:15:04:05 -0700` (day/month/year:hour:min:sec timezone).
@@ -52,29 +56,38 @@ To extract the path from a request line like `"GET /api/items?page=2 HTTP/1.1"`,
 Implement an `Analyzer` type with methods that return statistics without holding all logs in memory:
 
 ```go
-type Analyzer struct {
-    // ... unexported fields ...
+// Runs YOUR loganalyzer package. The API to implement:
+//
+//	func NewAnalyzer() *Analyzer                      // empty, ready to process logs
+//	func (a *Analyzer) ProcessLine(line string) error // parse one line, update the statistics
+//	func (a *Analyzer) StatusCounts() []StatusCount   // status code counts, by count (descending)
+//	func (a *Analyzer) TopPaths(n int) []PathCount    // top n paths, most-requested first
+//	func (a *Analyzer) Latency() LatencyStats         // p50, p95 and max latency
+//
+// Exact percentiles on a stream require storing every latency, which bends
+// the "streaming" constraint; a production tool would estimate them with a
+// sketch. For this project, store the latencies (8 bytes each) and compute
+// exact percentiles.
+import "gocourse/modules/05-io/project/loganalyzer"
+
+var lines = []string{
+	`10.0.0.2 - - [11/Oct/2026:13:00:00 +0000] "GET /api/items/7 HTTP/1.1" 200 1024 0.034`,
+	`10.0.0.3 - ada [11/Oct/2026:13:00:01 +0000] "GET /api/items?page=2 HTTP/1.1" 200 512 0.120`,
+	`10.0.0.2 - - [11/Oct/2026:13:00:02 +0000] "POST /api/items HTTP/1.1" 500 - 1.500`,
+	`not a log line`,
 }
 
-// NewAnalyzer returns an empty Analyzer ready to process logs
-func NewAnalyzer() *Analyzer { ... }
-
-// ProcessLine reads one log line and updates internal statistics
-func (a *Analyzer) ProcessLine(line string) error { ... }
-
-// StatusCounts returns a map of status code to count, sorted by count (descending)
-func (a *Analyzer) StatusCounts() []StatusCount { ... }
-
-// TopPaths returns the top N paths by request count, most-requested first
-func (a *Analyzer) TopPaths(n int) []PathCount { ... }
-
-// Latency returns p50, p95, and max latencies
-// Note: computing exact percentiles on a stream requires storing all values,
-// which violates the "streaming" constraint. Instead, estimate using
-// a sliding window or sketch. For this project, store the latencies
-// (acceptable since latencies are usually under 10KB for reasonable log volumes)
-// and compute exact percentiles.
-func (a *Analyzer) Latency() LatencyStats { ... }
+func main() {
+	a := loganalyzer.NewAnalyzer()
+	for _, line := range lines {
+		if err := a.ProcessLine(line); err != nil {
+			fmt.Println("skipped:", err)
+		}
+	}
+	fmt.Println(a.StatusCounts())
+	fmt.Println(a.TopPaths(2))
+	fmt.Printf("%+v\n", a.Latency())
+}
 ```
 
 Supporting types:
@@ -95,6 +108,9 @@ type LatencyStats struct {
     P95 time.Duration
     Max time.Duration
 }
+
+fmt.Println([]StatusCount{{200, 41}, {404, 3}}, []PathCount{{"/", 12}})
+fmt.Printf("%+v\n", LatencyStats{P50: 30 * time.Millisecond, P95: 180 * time.Millisecond, Max: time.Second})
 ```
 
 ### Output Formats

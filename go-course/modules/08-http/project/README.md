@@ -57,11 +57,22 @@ The API must expose:
 The HTTP layer must not depend on a specific storage implementation. Define a `Store` interface with methods:
 
 ```go
+// Checks the interface against YOUR MemoryStore (shortener/store.go).
+import "gocourse/modules/08-http/project/shortener"
+
+type Link = shortener.Link
+
 type Store interface {
-    Create(ctx context.Context, l Link) error
-    Get(ctx context.Context, code string) (Link, error)
-    Visit(ctx context.Context, code string) (Link, error)
+	Create(ctx context.Context, l Link) error
+	Get(ctx context.Context, code string) (Link, error)
+	Visit(ctx context.Context, code string) (Link, error)
 }
+
+var s Store = shortener.NewMemoryStore() // compiles: the method set matches
+ctx := context.Background()
+err := s.Create(ctx, Link{Code: "go", URL: "https://go.dev"})
+l, err2 := s.Visit(ctx, "go")
+fmt.Println(err, l.Visits, err2) // when you're done: <nil> 1 <nil>
 ```
 
 - **Create**: Stores a new link. Returns `ErrExists` if the code is already taken.

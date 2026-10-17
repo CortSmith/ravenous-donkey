@@ -35,6 +35,21 @@ To browse the course as a web page with navigation and progress tracking, open
 `index.html` in your browser. Rebuild it after course changes with
 `python3 scripts-build-site.py`.
 
+**Run the lesson snippets in the page.** Start the local runner from the course root and open
+<http://localhost:8090/>:
+
+```sh
+go run ./cmd/runner                                  # Go on your host
+docker compose run --rm --service-ports runner       # or in the course container
+```
+
+Every Go code block then gets a **▶ Run** button. Click a block to edit it, and press Ctrl+Enter to run it.
+Snippets are often fragments, so the runner wraps them in `package main` / `func main` and adds missing
+standard-library imports. The page shows the exact program that ran. Every block runs as written. A few are
+*meant* to fail (a compile error, a panic, a deadlock) and are labelled that way on the page. Some project
+snippets import your own package, so their output changes as you finish the exercise. The runner listens on
+localhost only and accepts runs only from its own page.
+
 ## Syllabus
 
 | # | Module | Topics | Exercises (`exercises/`) | Project (≤ 60 min) |

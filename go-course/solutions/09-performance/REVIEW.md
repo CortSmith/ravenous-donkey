@@ -20,6 +20,8 @@ func AppendInts(dst []byte, nums []int, sep byte) []byte {
     }
     return dst
 }
+
+fmt.Println(string(AppendInts(nil, []int{3, -1, 42}, ','))) // 3,-1,42
 ```
 
 **Why it's idiomatic:**
@@ -113,6 +115,10 @@ func estimateLen(fields []string) int {
     }
     return total
 }
+
+func main() {
+	fmt.Println(Line([]string{"plain", "with,comma", `say "hi"`})) // plain,"with,comma","say ""hi"""
+}
 ```
 
 **Why it's idiomatic:**
@@ -154,6 +160,10 @@ func AppendLine(dst []byte, fields []string) []byte {
     }
     return dst
 }
+
+func main() {
+	fmt.Println(string(AppendLine(nil, []string{"plain", "with,comma", `say "hi"`})))
+}
 ```
 
 **Why it's faster:**
@@ -189,10 +199,20 @@ BenchmarkLineFast/AppendLine-20   2480949    483.5 ns/op     0 B/op      0 alloc
 - **Readable:** Use when `Line` is called rarely or in isolation. One allocation per call is acceptable.
 - **Fast:** Use when encoding many records in a loop (e.g., server endpoint). Reuse the buffer:
   ```go
-  buf := make([]byte, 0, 4096)
-  for _, rec := range records {
-      buf = AppendLine(buf[:0], rec.Fields)
-      w.Write(buf)
+  import "gocourse/solutions/09-performance/exercises/csvline"
+
+  var AppendLine = csvline.AppendLine
+
+  func main() {
+  	records := []struct{ Fields []string }{{[]string{"a", "b,c"}}, {[]string{`say "hi"`, ""}}}
+  	w := os.Stdout
+
+  	buf := make([]byte, 0, 4096)
+  	for _, rec := range records {
+  		buf = AppendLine(buf[:0], rec.Fields)
+  		buf = append(buf, '\n') // AppendLine adds no line terminator
+  		w.Write(buf)
+  	}
   }
   ```
 
@@ -225,6 +245,8 @@ func Unique(items []string) []string {
     }
     return out
 }
+
+fmt.Println(Unique([]string{"b", "a", "b", "c"})) // [b a c]
 ```
 
 **Why it's idiomatic:**
@@ -240,16 +262,30 @@ The readable solution *is* already well-optimized. The starter code's main ineff
 
 **Starter (no prealloc):**
 ```go
-seen := map[string]bool{}          // empty, will grow
-var out []string                   // nil, will grow
-for _, it := range items { ... }
+items := []string{"b", "a", "b", "c"}
+seen := map[string]bool{} // empty, will grow
+var out []string          // nil, will grow
+for _, it := range items {
+	if !seen[it] {
+		seen[it] = true
+		out = append(out, it)
+	}
+}
+fmt.Println(out) // [b a c]
 ```
 
 **Optimized (prealloc):**
 ```go
-seen := make(map[string]bool, len(items))   // size hint
-out := make([]string, 0, len(items))        // capacity
-for _, it := range items { ... }
+items := []string{"b", "a", "b", "c"}
+seen := make(map[string]bool, len(items)) // size hint
+out := make([]string, 0, len(items))      // capacity
+for _, it := range items {
+	if !seen[it] {
+		seen[it] = true
+		out = append(out, it)
+	}
+}
+fmt.Println(out, cap(out)) // [b a c] 4
 ```
 
 With preallocation, the map is sized upfront, and the slice grows at most once or twice.
@@ -291,6 +327,13 @@ Always use the optimized version (with preallocation). The readability is unchan
 ### Readable Solution
 
 ```go
+// Record is one result row.
+type Record struct {
+	Name   string
+	Score  int
+	Passed bool
+}
+
 // lineenc.go
 type Encoder struct {
     w   io.Writer
@@ -303,7 +346,7 @@ func NewEncoder(w io.Writer) *Encoder {
 
 func (e *Encoder) Encode(r Record) error {
     e.buf = e.buf[:0]  // reset, keep capacity
-    
+
     e.buf = append(e.buf, "name="...)
     e.buf = strconv.AppendQuote(e.buf, r.Name)
     e.buf = append(e.buf, " score="...)
@@ -311,9 +354,15 @@ func (e *Encoder) Encode(r Record) error {
     e.buf = append(e.buf, " passed="...)
     e.buf = strconv.AppendBool(e.buf, r.Passed)
     e.buf = append(e.buf, '\n')
-    
+
     _, err := e.w.Write(e.buf)
     return err
+}
+
+func main() {
+	enc := NewEncoder(os.Stdout)
+	enc.Encode(Record{Name: "Ada", Score: 97, Passed: true})
+	enc.Encode(Record{Name: `Bob "the builder"`, Score: 41})
 }
 ```
 
@@ -332,13 +381,57 @@ The readable solution is already near-optimal. A minor speedup could be:
 
 **Minor optimization:**
 ```go
-func (e *Encoder) Encode(r Record) error {
-    e.buf = e.buf[:0]
-    e.buf = append(e.buf, "name="...)
-    e.buf = strconv.AppendQuote(e.buf, r.Name)
-    // ... etc., but use append with byte slices directly, no string conversions
-    _, err := e.w.Write(e.buf)
-    return err
+import "gocourse/solutions/09-performance/exercises/lineenc"
+
+type Record = lineenc.Record
+
+// AppendRecord appends the encoded line for r to dst. It is the building block
+// for both Encoder.Encode and WriteRecord, and lets callers batch many records
+// into one buffer before a single Write.
+func AppendRecord(dst []byte, r Record) []byte {
+	dst = append(dst, "name="...)
+	dst = strconv.AppendQuote(dst, r.Name)
+	dst = append(dst, " score="...)
+	dst = strconv.AppendInt(dst, int64(r.Score), 10)
+	dst = append(dst, " passed="...)
+	dst = strconv.AppendBool(dst, r.Passed)
+	return append(dst, '\n')
+}
+
+// bufPool holds *[]byte, not []byte: putting a slice header directly into an
+// interface would itself allocate (staticcheck SA6002).
+var bufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 128)
+		return &b
+	},
+}
+
+// maxPooledCap stops one huge record from pinning a huge buffer in the pool
+// forever (see golang/go#23199).
+const maxPooledCap = 4 << 10
+
+// WriteRecord is a stateless, goroutine-safe alternative to Encoder: it
+// borrows a buffer from a sync.Pool. Use it when there is no natural owner for
+// a buffer (e.g. many goroutines writing records to different writers).
+// In single-goroutine code the Encoder is simpler and at least as fast.
+func WriteRecord(w io.Writer, r Record) error {
+	bp := bufPool.Get().(*[]byte)
+	b := AppendRecord((*bp)[:0], r)
+	_, err := w.Write(b)
+	if cap(b) <= maxPooledCap {
+		*bp = b
+		bufPool.Put(bp)
+	}
+	if err != nil {
+		return fmt.Errorf("lineenc: write record: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	WriteRecord(os.Stdout, Record{Name: "Ada", Score: 97, Passed: true})
+	fmt.Println(testing.AllocsPerRun(100, func() { WriteRecord(io.Discard, Record{Name: "x"}) })) // 0
 }
 ```
 
@@ -385,42 +478,53 @@ Always use the buffer-reuse approach. It's not less readable, and it's essential
 Instead of a regex, manual parsing is simpler and faster:
 
 ```go
+import "gocourse/solutions/09-performance/exercises/semver"
+
+type Version = semver.Version
+
+var ErrInvalid = semver.ErrInvalid
+
 // fast.go
 func Parse(s string) (Version, error) {
     // Strip optional "v" prefix
     if len(s) > 0 && s[0] == 'v' {
         s = s[1:]
     }
-    
+
     // Find the first dot
     dot1 := strings.Index(s, ".")
     if dot1 == -1 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     major, err := strconv.Atoi(s[:dot1])
     if err != nil || major < 0 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     // Find the second dot
     dot2 := strings.Index(s[dot1+1:], ".")
     if dot2 == -1 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
     dot2 += dot1 + 1
-    
+
     minor, err := strconv.Atoi(s[dot1+1 : dot2])
     if err != nil || minor < 0 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     patch, err := strconv.Atoi(s[dot2+1:])
     if err != nil || patch < 0 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     return Version{Major: major, Minor: minor, Patch: patch}, nil
+}
+
+func main() {
+	fmt.Println(Parse("v1.24.2")) // {1 24 2} <nil>
+	fmt.Println(Parse("1.x.2"))   // semver: parse "1.x.2": invalid version
 }
 ```
 
@@ -435,12 +539,18 @@ func Parse(s string) (Version, error) {
 Using `strings.Cut` (Go 1.18+) makes it cleaner:
 
 ```go
+import "gocourse/solutions/09-performance/exercises/semver"
+
+type Version = semver.Version
+
+var ErrInvalid = semver.ErrInvalid
+
 // Slightly cleaner version
 func Parse(s string) (Version, error) {
     if len(s) > 0 && s[0] == 'v' {
         s = s[1:]
     }
-    
+
     before, after, ok := strings.Cut(s, ".")
     if !ok {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
@@ -449,7 +559,7 @@ func Parse(s string) (Version, error) {
     if err != nil || major < 0 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     before, patch, ok := strings.Cut(after, ".")
     if !ok {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
@@ -458,13 +568,18 @@ func Parse(s string) (Version, error) {
     if err != nil || minor < 0 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     patchInt, err := strconv.Atoi(patch)
     if err != nil || patchInt < 0 {
         return Version{}, fmt.Errorf("semver: parse %q: %w", s, ErrInvalid)
     }
-    
+
     return Version{Major: major, Minor: minor, Patch: patchInt}, nil
+}
+
+func main() {
+	fmt.Println(Parse("v1.24.2")) // {1 24 2} <nil>
+	fmt.Println(Parse("1.2"))     // semver: parse "1.2": invalid version
 }
 ```
 
@@ -513,6 +628,17 @@ The readable solution keeps the same structure but:
 2. **Keep the FieldsFunc approach** (it's fast enough once regexes aren't the bottleneck)
 
 ```go
+// entry is one parsed log line.
+type entry struct {
+	method   string
+	path     string
+	status   int
+	duration int64
+	bytes    int64
+}
+
+func isSep(r rune) bool { return r == ' ' || r == '\t' }
+
 // logstats.go (partial)
 var (
     methodRE = regexp.MustCompile(`^[A-Z]+$`)
@@ -529,7 +655,30 @@ func parseLine(line string) (entry, error) {
     if !methodRE.MatchString(f[1]) {  // compiled once, reused
         return entry{}, fmt.Errorf("bad method %q", f[1])
     }
-    // ... etc.
+    if !strings.HasPrefix(f[2], "/") {
+        return entry{}, fmt.Errorf("bad path %q", f[2])
+    }
+    if !statusRE.MatchString(f[3]) {
+        return entry{}, fmt.Errorf("bad status %q", f[3])
+    }
+    status, _ := strconv.Atoi(f[3]) // can't fail after statusRE
+    if !numberRE.MatchString(f[4]) || !numberRE.MatchString(f[5]) {
+        return entry{}, fmt.Errorf("bad number in %q", line)
+    }
+    dur, err := strconv.ParseInt(f[4], 10, 64)
+    if err != nil {
+        return entry{}, fmt.Errorf("bad duration: %w", err)
+    }
+    size, err := strconv.ParseInt(f[5], 10, 64)
+    if err != nil {
+        return entry{}, fmt.Errorf("bad bytes: %w", err)
+    }
+    return entry{method: f[1], path: f[2], status: status, duration: dur, bytes: size}, nil
+}
+
+func main() {
+	fmt.Println(parseLine("2026-10-11T12:00:00Z GET /api/users 200 12 5120"))
+	fmt.Println(parseLine("2026-10-11T12:00:00Z get /api/users 200 12 5120"))
 }
 ```
 
@@ -540,6 +689,15 @@ This alone cuts allocations dramatically (regex compilation is expensive).
 Replace regexes and FieldsFunc with manual parsing:
 
 ```go
+// entry is one parsed log line.
+type entry struct {
+	method   string
+	path     string
+	status   int
+	duration int64
+	bytes    int64
+}
+
 // fast.go
 func parseLineOptimized(line string) (entry, error) {
     // Manual field extraction: scan for separators
@@ -547,7 +705,7 @@ func parseLineOptimized(line string) (entry, error) {
     var fieldEnds [6]int
     fieldIdx := 0
     inField := false
-    
+
     for i := 0; i < len(line) && fieldIdx < 6; i++ {
         c := line[i]
         if c == ' ' || c == '\t' {
@@ -567,46 +725,46 @@ func parseLineOptimized(line string) (entry, error) {
         fieldEnds[fieldIdx] = len(line)
         fieldIdx++
     }
-    
+
     if fieldIdx != 6 {
         return entry{}, fmt.Errorf("want 6 fields, got %d", fieldIdx)
     }
-    
+
     // Extract fields as substrings (no allocation)
     method := line[fieldStarts[1]:fieldEnds[1]]
     path := line[fieldStarts[2]:fieldEnds[2]]
     statusStr := line[fieldStarts[3]:fieldEnds[3]]
     durStr := line[fieldStarts[4]:fieldEnds[4]]
     bytesStr := line[fieldStarts[5]:fieldEnds[5]]
-    
+
     // Validate method: all uppercase letters
     if !isMethod(method) {
         return entry{}, fmt.Errorf("bad method %q", method)
     }
-    
+
     // Validate path: starts with /
     if len(path) == 0 || path[0] != '/' {
         return entry{}, fmt.Errorf("bad path %q", path)
     }
-    
+
     // Validate status: exactly 3 digits, 100-599
     status := parseStatus(statusStr)
     if status < 100 || status > 599 {
         return entry{}, fmt.Errorf("bad status %q", statusStr)
     }
-    
+
     // Validate and parse duration
     dur, err := strconv.ParseInt(durStr, 10, 64)
     if err != nil {
         return entry{}, fmt.Errorf("bad duration: %w", err)
     }
-    
+
     // Validate and parse bytes
     size, err := strconv.ParseInt(bytesStr, 10, 64)
     if err != nil {
         return entry{}, fmt.Errorf("bad bytes: %w", err)
     }
-    
+
     return entry{method: method, path: path, status: status, duration: dur, bytes: size}, nil
 }
 
@@ -631,6 +789,12 @@ func parseStatus(s string) int {
         return -1
     }
     return int(s[0]-'0')*100 + int(s[1]-'0')*10 + int(s[2]-'0')
+}
+
+func main() {
+	fmt.Println(parseLineOptimized("2026-10-11T12:00:00Z GET /api/users 200 12 5120"))
+	fmt.Println(parseLineOptimized("2026-10-11T12:00:00Z GET /api/users 700 12 5120"))
+	fmt.Println(testing.AllocsPerRun(100, func() { parseLineOptimized("2026-10-11T12:00:00Z GET /api/users 200 12 5120") })) // 0
 }
 ```
 

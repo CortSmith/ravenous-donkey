@@ -178,6 +178,8 @@ func Pages(total, perPage int) int {
 	}
 	return (total + perPage - 1) / perPage // ceiling division
 }
+
+fmt.Println(Pages(0, 10), Pages(21, 10), Pages(20, 10), Pages(10, 0)) // 0 3 2 0
 ```
 
 It is shorter and branch-free but **overflows** when `total` is near
@@ -264,6 +266,16 @@ Keep `pending` sorted at insert time; then the due reminders are a prefix,
 found by binary search:
 
 ```go
+import "gocourse/solutions/04-testing/exercises/reminder"
+
+type Reminder = reminder.Reminder
+
+type Scheduler struct {
+	clock   reminder.Clock
+	sender  reminder.Sender
+	pending []Reminder // sorted by Due
+}
+
 func (s *Scheduler) Add(r Reminder) {
 	// Insert after any reminder due at the same time, so ties keep
 	// insertion order.
@@ -301,6 +313,31 @@ func (s *Scheduler) Flush() (int, error) {
 	// prepending them keeps the slice sorted.
 	s.pending = append(failed, s.pending[n:]...)
 	return sent, errors.Join(errs...)
+}
+
+type fixedClock time.Time
+
+func (c fixedClock) Now() time.Time { return time.Time(c) }
+
+type printSender struct{}
+
+func (printSender) Send(to, body string) error {
+	if to == "nobody" {
+		return errors.New("no such recipient")
+	}
+	fmt.Println("sent to", to)
+	return nil
+}
+
+func main() {
+	t0 := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	s := &Scheduler{clock: fixedClock(t0), sender: printSender{}}
+	s.Add(Reminder{To: "bob", Due: t0.Add(-time.Minute)})
+	s.Add(Reminder{To: "later", Due: t0.Add(time.Hour)})
+	s.Add(Reminder{To: "nobody", Due: t0.Add(-2 * time.Minute)})
+	s.Add(Reminder{To: "ada", Due: t0.Add(-time.Minute)}) // ties keep insertion order
+	sent, err := s.Flush()
+	fmt.Println(sent, err, len(s.pending)) // 2 send reminder to nobody: no such recipient 2
 }
 ```
 

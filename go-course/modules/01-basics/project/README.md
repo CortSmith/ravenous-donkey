@@ -60,8 +60,11 @@ normalized to the plain ASCII `'` in the output. Every other rune — spaces,
 punctuation, newlines — separates words and is dropped.
 
 ```go
-Tokenize("The fox's 2nd jump—don't blink!")
-// ["the", "fox's", "2nd", "jump", "don't", "blink"]
+// Runs YOUR Tokenize from modules/01-basics/project/textstats.
+import "gocourse/modules/01-basics/project/textstats"
+
+fmt.Printf("%q\n", textstats.Tokenize("The fox's 2nd jump—don't blink!"))
+// want: ["the" "fox's" "2nd" "jump" "don't" "blink"]
 ```
 
 `strings.FieldsFunc` cannot implement the apostrophe rule by itself because
@@ -147,21 +150,32 @@ Track whether the *current* builder already has content and whether the
 current word:
 
 ```go
-runes := []rune(text)
-for i, r := range runes {
-    switch {
-    case isWordRune(r):
-        cur.WriteRune(unicode.ToLower(r))
-    case isApostrophe(r) && cur.Len() > 0 && i+1 < len(runes) && isWordRune(runes[i+1]):
-        cur.WriteByte('\'')
-    case cur.Len() > 0:
-        words = append(words, cur.String())
-        cur.Reset()
-    }
+func tokenize(text string) []string {
+	var words []string
+	var cur strings.Builder
+	runes := []rune(text)
+	for i, r := range runes {
+		switch {
+		case isWordRune(r):
+			cur.WriteRune(unicode.ToLower(r))
+		case isApostrophe(r) && cur.Len() > 0 && i+1 < len(runes) && isWordRune(runes[i+1]):
+			cur.WriteByte('\'')
+		case cur.Len() > 0:
+			words = append(words, cur.String())
+			cur.Reset()
+		}
+	}
+	if cur.Len() > 0 {
+		words = append(words, cur.String())
+	}
+	return words
 }
-if cur.Len() > 0 {
-    words = append(words, cur.String())
-}
+
+func isWordRune(r rune) bool   { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+func isApostrophe(r rune) bool { return r == '\'' || r == '’' }
+
+fmt.Printf("%q\n", tokenize("Rock'n'roll isn't 'quoted'"))
+// ["rock'n'roll" "isn't" "quoted"]
 ```
 
 </details>
@@ -189,13 +203,20 @@ readable as "tokenize, count, measure, rank."
 <summary>Hint 4: wiring the CLI</summary>
 
 ```go
-fs := flag.NewFlagSet("textstats", flag.ContinueOnError)
-fs.SetOutput(stderr)
-n := fs.Int("n", 10, "number of most frequent words to show")
-all := fs.Bool("all", false, "include stopwords in the top words")
-if err := fs.Parse(args); err != nil {
-    return 2 // flag already printed the error and usage to stderr
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("textstats", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	n := fs.Int("n", 10, "number of most frequent words to show")
+	all := fs.Bool("all", false, "include stopwords in the top words")
+	if err := fs.Parse(args); err != nil {
+		return 2 // flag already printed the error and usage to stderr
+	}
+	fmt.Fprintf(stdout, "n=%d all=%v\n", *n, *all)
+	return 0
 }
+
+fmt.Println(run([]string{"-n", "3", "-all"}, os.Stdout, os.Stderr)) // n=3 all=true, then 0
+fmt.Println(run([]string{"-n", "x"}, os.Stdout, os.Stdout))         // the error and usage, then 2
 ```
 
 For files, read each with `os.ReadFile` (its error, a `*fs.PathError`, already

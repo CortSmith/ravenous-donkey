@@ -30,6 +30,15 @@ func (c *Counter) Value() int64 {
     defer c.mu.Unlock()
     return c.n
 }
+
+var c Counter
+var wg sync.WaitGroup
+for range 100 {
+	wg.Add(1)
+	go func() { defer wg.Done(); c.Inc() }()
+}
+wg.Wait()
+fmt.Println(c.Value()) // 100
 ```
 
 **Why it's idiomatic**:
@@ -50,6 +59,15 @@ func (c *AtomicCounter) Add(delta int64) {
 func (c *AtomicCounter) Value() int64 {
     return c.n.Load()
 }
+
+var c AtomicCounter
+var wg sync.WaitGroup
+for range 100 {
+	wg.Add(1)
+	go func() { defer wg.Done(); c.Add(2) }()
+}
+wg.Wait()
+fmt.Println(c.Value()) // 200
 ```
 
 ### Trade-off
@@ -83,6 +101,10 @@ For a simple counter, atomic is measurably faster (benchmark shows ~4x throughpu
 **What it does**: Splits a slice into chunks and sums each chunk in a goroutine.
 
 ```go
+import "gocourse/solutions/07-concurrency/exercises/parallelsum"
+
+var Chunks = parallelsum.Chunks
+
 func Sum(nums []int64, workers int) int64 {
     if workers < 1 {
         workers = runtime.GOMAXPROCS(0)
@@ -109,6 +131,14 @@ func Sum(nums []int64, workers int) int64 {
         total += p
     }
     return total
+}
+
+func main() {
+	nums := make([]int64, 1_000_000)
+	for i := range nums {
+		nums[i] = int64(i)
+	}
+	fmt.Println(Sum(nums, 4)) // 499999500000
 }
 ```
 
@@ -152,46 +182,72 @@ Use local accumulation here; it's both clear and fast.
 **What it does**: Applies a function to every element of a slice using a fixed number of worker goroutines, keeping results in order.
 
 ```go
+import "gocourse/solutions/07-concurrency/exercises/workerpool"
+
+var ErrInvalidWorkers = workerpool.ErrInvalidWorkers
+
+// Map calls fn on every element of in using at most workers goroutines and
+// returns the results in the same order as in: out[i] = fn(ctx, in[i]).
+//
+// If any call fails, Map cancels the context passed to the calls still
+// running, starts no further calls, waits for every worker to return, and
+// returns (nil, err) with the first error. If ctx is done before all calls
+// finish, Map returns (nil, context.Cause(ctx)), which is ctx.Err() unless the
+// caller canceled with a cause. Map never leaves goroutines running after it
+// returns.
 func Map[In, Out any](ctx context.Context, in []In, workers int, fn func(context.Context, In) (Out, error)) ([]Out, error) {
-    if workers < 1 {
-        return nil, ErrInvalidWorkers
-    }
-    ctx, cancel := context.WithCancelCause(ctx)
-    defer cancel(nil)
+	if workers < 1 {
+		return nil, ErrInvalidWorkers
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
-    out := make([]Out, len(in))
-    jobs := make(chan int)  // unbuffered: no job is "claimed" early
+	out := make([]Out, len(in))
+	jobs := make(chan int) // indices into in; unbuffered so no job is "claimed" early
 
-    var wg sync.WaitGroup
-    for range min(workers, len(in)) {
-        wg.Add(1)
-        go func() {
-            defer wg.Done()
-            for i := range jobs {
-                v, err := fn(ctx, in[i])
-                if err != nil {
-                    cancel(err)  // cancel on first error
-                    return
-                }
-                out[i] = v  // each index by exactly one worker
-            }
-        }()
-    }
+	var wg sync.WaitGroup
+	for range min(workers, len(in)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				v, err := fn(ctx, in[i])
+				if err != nil {
+					cancel(err) // only the first cause sticks; later calls are no-ops
+					return
+				}
+				out[i] = v // each index is written by exactly one worker
+			}
+		}()
+	}
 
-    for i := range in {
-        select {
-        case jobs <- i:
-        case <-ctx.Done():
-            break
-        }
-    }
-    close(jobs)
-    wg.Wait()
+	// The calling goroutine is the producer, so it owns (and closes) jobs.
+feed:
+	for i := range in {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(jobs)
+	wg.Wait()
 
-    if err := context.Cause(ctx); err != nil {
-        return nil, err
-    }
-    return out, nil
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func main() {
+	double := func(ctx context.Context, n int) (int, error) {
+		if n < 0 {
+			return 0, fmt.Errorf("negative input %d", n)
+		}
+		return 2 * n, nil
+	}
+	fmt.Println(Map(context.Background(), []int{1, 2, 3, 4}, 2, double)) // [2 4 6 8] <nil>
+	fmt.Println(Map(context.Background(), []int{1, -2, 3}, 2, double))   // [] negative input -2
 }
 ```
 
@@ -319,6 +375,13 @@ func SumSquares(ctx context.Context, nums []int, workers int) (int, error) {
     }
     return total, nil
 }
+
+func main() {
+	fmt.Println(SumSquares(context.Background(), []int{1, 2, 3, 4}, 3)) // 30 <nil>
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fmt.Println(SumSquares(ctx, []int{1, 2, 3}, 2)) // 0 context canceled
+}
 ```
 
 **Why it's idiomatic**:
@@ -332,16 +395,25 @@ func SumSquares(ctx context.Context, nums []int, workers int) (int, error) {
 The most important lesson: in a concurrent pipeline, every `case` that could block must have a matching `case <-ctx.Done()`.
 
 ```go
-// BAD: can block on send if no one is receiving and ctx is not done
-select {
-case out <- value:  // might block forever
+func produce(ctx context.Context, out chan<- int, value int) {
+	// BAD would be a send with no other case: it blocks forever if no one is
+	// receiving and ctx is not done.
+	//
+	//	out <- value
+
+	// GOOD: can exit on cancellation
+	select {
+	case out <- value:
+	case <-ctx.Done():
+		fmt.Println("gave up:", ctx.Err())
+		return // no goroutine leak
+	}
 }
 
-// GOOD: can exit on cancellation
-select {
-case out <- value:
-case <-ctx.Done():
-    return  // no goroutine leak
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	produce(ctx, make(chan int), 1) // nobody receives: gave up: context deadline exceeded
 }
 ```
 
@@ -379,47 +451,79 @@ Always check `ctx.Done()`. It's a requirement for correctness, not an optimizati
 **What it does**: Fetches many URLs concurrently, bounding in-flight fetches with a semaphore channel.
 
 ```go
+import "gocourse/solutions/07-concurrency/exercises/fetcher"
+
+type (
+	FetchFunc = fetcher.FetchFunc
+	Result    = fetcher.Result
+)
+
+// FetchAll fetches every URL in urls with at most limit calls to fetch in
+// flight at any moment (limit < 1 is treated as 1). It returns one Result per
+// URL, in the same order as urls. A failed fetch does not stop the others.
+//
+// If ctx is canceled, FetchAll starts no new fetches; the Result for every
+// URL that was never started has Err == ctx.Err(). FetchAll waits for all
+// started fetches to return before it returns.
 func FetchAll(ctx context.Context, urls []string, limit int, fetch FetchFunc) []Result {
-    results := make([]Result, len(urls))
-    sem := make(chan struct{}, max(limit, 1))  // token per in-flight fetch
+	results := make([]Result, len(urls))
+	sem := make(chan struct{}, max(limit, 1)) // a token per in-flight fetch
 
-    var wg sync.WaitGroup
-    for i, u := range urls {
-        results[i].URL = u
+	var wg sync.WaitGroup
+	for i, u := range urls {
+		results[i].URL = u
 
-        // Acquire in the parent: bounds goroutines, not just busy ones
-        select {
-        case sem <- struct{}{}:
-        case <-ctx.Done():
-        }
-        if err := ctx.Err(); err != nil {
-            for j := i; j < len(urls); j++ {
-                results[j] = Result{URL: urls[j], Err: err}
-            }
-            break
-        }
+		// Acquire in the parent: this bounds the number of goroutines, not
+		// just the number of busy ones, and lets us stop launching early.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		// select picks randomly when both cases are ready, so re-check:
+		// never start a fetch once ctx is done.
+		if err := ctx.Err(); err != nil {
+			for j := i; j < len(urls); j++ {
+				results[j] = Result{URL: urls[j], Err: err}
+			}
+			break
+		}
 
-        wg.Add(1)
-        go func(i int, u string) {
-            defer wg.Done()
-            defer func() { <-sem }()  // release
-
-            body, err := fetch(ctx, u)
-            results[i].Body, results[i].Err = body, err
-        }(i, u)  // capture i, u to avoid closure bugs
-    }
-    wg.Wait()
-    return results
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }() // release
+			body, err := fetch(ctx, u)
+			results[i].Body, results[i].Err = body, err // each goroutine owns one element
+		}()
+	}
+	wg.Wait()
+	return results
 }
 
+// Errors combines the failures in results into one error, each wrapped with
+// its URL, using errors.Join. It returns nil if every fetch succeeded.
 func Errors(results []Result) error {
-    var errs []error
-    for _, r := range results {
-        if r.Err != nil {
-            errs = append(errs, fmt.Errorf("fetch %s: %w", r.URL, r.Err))
-        }
-    }
-    return errors.Join(errs...)  // nil if errs is empty
+	var errs []error
+	for _, r := range results {
+		if r.Err != nil {
+			errs = append(errs, fmt.Errorf("fetch %s: %w", r.URL, r.Err))
+		}
+	}
+	return errors.Join(errs...) // nil when errs is empty
+}
+
+func main() {
+	fetch := func(ctx context.Context, url string) (string, error) {
+		if strings.Contains(url, "bad") {
+			return "", errors.New("connection refused")
+		}
+		return "<html>" + url + "</html>", nil
+	}
+	results := FetchAll(context.Background(), []string{"a.example", "bad.example", "c.example"}, 2, fetch)
+	for _, r := range results {
+		fmt.Printf("%s: %q %v\n", r.URL, r.Body, r.Err)
+	}
+	fmt.Println(Errors(results)) // fetch bad.example: connection refused
 }
 ```
 
@@ -481,6 +585,14 @@ Acquire in parent is clearer.
        }
        return hex.EncodeToString(h.Sum(nil)), nil
    }
+
+   func main() {
+   	f, _ := os.CreateTemp("", "hash-*")
+   	defer os.Remove(f.Name())
+   	f.WriteString("hello\n")
+   	f.Close()
+   	fmt.Println(HashFile(context.Background(), f.Name())) // 5891b5b5... <nil>
+   }
    ```
 
 2. **filesBySize(ctx, root, minSize)**: walk and group by size.
@@ -503,98 +615,249 @@ Acquire in parent is clearer.
        }
        return bySize, nil
    }
+
+   func main() {
+   	dir, _ := os.MkdirTemp("", "bysize")
+   	defer os.RemoveAll(dir)
+   	for name, body := range map[string]string{"a": "12345", "b": "abcde", "c": "x", "empty": ""} {
+   		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
+   	}
+   	bySize, err := filesBySize(context.Background(), dir, 1)
+   	fmt.Println(len(bySize[5]), len(bySize[1]), len(bySize[0]), err) // 2 1 0 <nil>
+   }
    ```
 
 3. **hashAll(ctx, paths, opts)**: bounded worker pool hashing.
    ```go
+   import "gocourse/solutions/07-concurrency/project/dupfind"
+
+   type Options = dupfind.Options
+
+   var HashFile = dupfind.HashFile
+
+   // hashAll hashes paths with a bounded worker pool and returns the hashes in
+   // the same order as paths. It stops at the first error.
    func hashAll(ctx context.Context, paths []string, opts Options) ([]string, error) {
-       hash := opts.Hash
-       if hash == nil { hash = HashFile }
-       workers := opts.Workers
-       if workers < 1 { workers = runtime.GOMAXPROCS(0) }
+   	hash := opts.Hash
+   	if hash == nil {
+   		hash = HashFile
+   	}
+   	workers := opts.Workers
+   	if workers < 1 {
+   		workers = runtime.GOMAXPROCS(0)
+   	}
 
-       ctx, cancel := context.WithCancelCause(ctx)
-       defer cancel(nil)
+   	ctx, cancel := context.WithCancelCause(ctx)
+   	defer cancel(nil)
 
-       hashes := make([]string, len(paths))
-       jobs := make(chan int)
+   	hashes := make([]string, len(paths))
+   	jobs := make(chan int)
+   	var wg sync.WaitGroup
+   	for range min(workers, len(paths)) {
+   		wg.Add(1)
+   		go func() {
+   			defer wg.Done()
+   			for i := range jobs {
+   				h, err := hash(ctx, paths[i])
+   				if err != nil {
+   					cancel(fmt.Errorf("hash %s: %w", paths[i], err))
+   					return
+   				}
+   				hashes[i] = h
+   			}
+   		}()
+   	}
 
-       var wg sync.WaitGroup
-       for range min(workers, len(paths)) {
-           wg.Add(1)
-           go func() {
-               defer wg.Done()
-               for i := range jobs {
-                   h, err := hash(ctx, paths[i])
-                   if err != nil {
-                       cancel(fmt.Errorf("hash %s: %w", paths[i], err))
-                       return
-                   }
-                   hashes[i] = h
-               }
-           }()
-       }
+   feed:
+   	for i := range paths {
+   		select {
+   		case jobs <- i:
+   		case <-ctx.Done():
+   			break feed
+   		}
+   	}
+   	close(jobs)
+   	wg.Wait()
 
-       for i := range paths {
-           select {
-           case jobs <- i:
-           case <-ctx.Done():
-               break
-           }
-       }
-       close(jobs)
-       wg.Wait()
+   	if err := context.Cause(ctx); err != nil {
+   		return nil, err
+   	}
+   	return hashes, nil
+   }
 
-       if err := context.Cause(ctx); err != nil {
-           return nil, err
-       }
-       return hashes, nil
+   func main() {
+   	dir, _ := os.MkdirTemp("", "hashall")
+   	defer os.RemoveAll(dir)
+   	var paths []string
+   	for _, name := range []string{"a", "b", "c"} {
+   		p := filepath.Join(dir, name)
+   		os.WriteFile(p, []byte("same"), 0o644)
+   		paths = append(paths, p)
+   	}
+   	hashes, err := hashAll(context.Background(), paths, Options{Workers: 2})
+   	fmt.Println(len(hashes), hashes[0] == hashes[2], err) // 3 true <nil>
    }
    ```
 
 4. **Find**: orchestrates the whole process.
    ```go
+   import "gocourse/solutions/07-concurrency/project/dupfind"
+
+   type (
+   	Options = dupfind.Options
+   	Group   = dupfind.Group
+   )
+
+   var HashFile = dupfind.HashFile
+
+   // Find walks root and returns every group of duplicate regular files.
+   // Symlinks and other non-regular files are ignored. Groups are sorted by
+   // Size descending, then by their first path; paths within a group are
+   // sorted. Find returns a nil slice (and nil error) when there are no
+   // duplicates.
+   //
+   // If walking or hashing fails, or ctx is canceled, Find stops hashing,
+   // waits for its goroutines to exit, and returns the error.
    func Find(ctx context.Context, root string, opts Options) ([]Group, error) {
-       bySize, err := filesBySize(ctx, root, max(opts.MinSize, 1))
-       if err != nil { return nil, err }
+   	bySize, err := filesBySize(ctx, root, max(opts.MinSize, 1))
+   	if err != nil {
+   		return nil, err
+   	}
 
-       // Only hash files that share a size
-       var candidates []string
-       sizeOf := make(map[string]int64)
-       for size, paths := range bySize {
-           if len(paths) < 2 { continue }
-           for _, p := range paths {
-               candidates = append(candidates, p)
-               sizeOf[p] = size
-           }
-       }
+   	var candidates []string
+   	sizeOf := make(map[string]int64)
+   	for size, paths := range bySize {
+   		if len(paths) < 2 {
+   			continue // a unique size cannot have a duplicate: never read it
+   		}
+   		for _, p := range paths {
+   			candidates = append(candidates, p)
+   			sizeOf[p] = size
+   		}
+   	}
 
-       hashes, err := hashAll(ctx, candidates, opts)
-       if err != nil { return nil, err }
+   	hashes, err := hashAll(ctx, candidates, opts)
+   	if err != nil {
+   		return nil, err
+   	}
 
-       // Group by (size, hash)
-       type key struct { size int64; hash string }
-       byKey := make(map[key][]string)
-       for i, p := range candidates {
-           k := key{sizeOf[p], hashes[i]}
-           byKey[k] = append(byKey[k], p)
-       }
+   	type key struct {
+   		size int64
+   		hash string
+   	}
+   	byKey := make(map[key][]string)
+   	for i, p := range candidates {
+   		k := key{sizeOf[p], hashes[i]}
+   		byKey[k] = append(byKey[k], p)
+   	}
 
-       var groups []Group
-       for k, paths := range byKey {
-           if len(paths) < 2 { continue }
-           slices.Sort(paths)
-           groups = append(groups, Group{Size: k.size, Hash: k.hash, Paths: paths})
-       }
+   	var groups []Group
+   	for k, paths := range byKey {
+   		if len(paths) < 2 {
+   			continue
+   		}
+   		slices.Sort(paths)
+   		groups = append(groups, Group{Size: k.size, Hash: k.hash, Paths: paths})
+   	}
+   	slices.SortFunc(groups, func(a, b Group) int {
+   		return cmp.Or(
+   			cmp.Compare(b.Size, a.Size), // larger files first
+   			cmp.Compare(a.Paths[0], b.Paths[0]),
+   		)
+   	})
+   	return groups, nil
+   }
 
-       // Sort groups: size descending, then first path
-       slices.SortFunc(groups, func(a, b Group) int {
-           return cmp.Or(
-               cmp.Compare(b.Size, a.Size),
-               cmp.Compare(a.Paths[0], b.Paths[0]),
-           )
-       })
-       return groups, nil
+   // filesBySize walks root and groups regular files of at least minSize bytes
+   // by size.
+   func filesBySize(ctx context.Context, root string, minSize int64) (map[int64][]string, error) {
+   	bySize := make(map[int64][]string)
+   	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+   		if err != nil {
+   			return err
+   		}
+   		if err := ctx.Err(); err != nil {
+   			return err
+   		}
+   		if !d.Type().IsRegular() {
+   			return nil // directories, symlinks, devices, sockets...
+   		}
+   		info, err := d.Info()
+   		if err != nil {
+   			return err
+   		}
+   		if info.Size() >= minSize {
+   			bySize[info.Size()] = append(bySize[info.Size()], path)
+   		}
+   		return nil
+   	})
+   	if err != nil {
+   		return nil, fmt.Errorf("walk %s: %w", root, err)
+   	}
+   	return bySize, nil
+   }
+
+   // hashAll hashes paths with a bounded worker pool and returns the hashes in
+   // the same order as paths. It stops at the first error.
+   func hashAll(ctx context.Context, paths []string, opts Options) ([]string, error) {
+   	hash := opts.Hash
+   	if hash == nil {
+   		hash = HashFile
+   	}
+   	workers := opts.Workers
+   	if workers < 1 {
+   		workers = runtime.GOMAXPROCS(0)
+   	}
+
+   	ctx, cancel := context.WithCancelCause(ctx)
+   	defer cancel(nil)
+
+   	hashes := make([]string, len(paths))
+   	jobs := make(chan int)
+   	var wg sync.WaitGroup
+   	for range min(workers, len(paths)) {
+   		wg.Add(1)
+   		go func() {
+   			defer wg.Done()
+   			for i := range jobs {
+   				h, err := hash(ctx, paths[i])
+   				if err != nil {
+   					cancel(fmt.Errorf("hash %s: %w", paths[i], err))
+   					return
+   				}
+   				hashes[i] = h
+   			}
+   		}()
+   	}
+
+   feed:
+   	for i := range paths {
+   		select {
+   		case jobs <- i:
+   		case <-ctx.Done():
+   			break feed
+   		}
+   	}
+   	close(jobs)
+   	wg.Wait()
+
+   	if err := context.Cause(ctx); err != nil {
+   		return nil, err
+   	}
+   	return hashes, nil
+   }
+
+   func main() {
+   	dir, _ := os.MkdirTemp("", "dupfind")
+   	defer os.RemoveAll(dir)
+   	for name, body := range map[string]string{"a.txt": "hello", "b.txt": "hello", "c.txt": "world", "d.txt": "much longer"} {
+   		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
+   	}
+   	groups, err := Find(context.Background(), dir, Options{})
+   	for _, g := range groups {
+   		fmt.Println(g.Size, len(g.Paths), filepath.Base(g.Paths[0]), filepath.Base(g.Paths[1]))
+   	}
+   	fmt.Println(err) // one group: 5 2 a.txt b.txt, then <nil>
    }
    ```
 

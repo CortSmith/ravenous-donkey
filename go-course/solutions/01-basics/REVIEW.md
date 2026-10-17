@@ -16,6 +16,8 @@ func Reverse(s string) string {
 	}
 	return string(r) // re-encode to UTF-8
 }
+
+fmt.Println(Reverse("Hello, 世界")) // 界世 ,olleH
 ```
 
 **Why this works:**
@@ -40,6 +42,9 @@ func ReverseFast(s string) string {
 	}
 	return b.String()
 }
+
+fmt.Println(ReverseFast("Hello, 世界"))        // 界世 ,olleH
+fmt.Printf("%+q\n", ReverseFast("a\xffb"))    // "b\ufffda": invalid bytes become U+FFFD
 ```
 
 **Why it's faster:**
@@ -91,6 +96,8 @@ func Dedupe(s []string) []string {
 	}
 	return out
 }
+
+fmt.Println(Dedupe([]string{"b", "a", "b", "c", "a"})) // [b a c]
 ```
 
 **Why this works:**
@@ -116,6 +123,8 @@ func CompactInPlace(s []int) []int {
 	}
 	return s[:k]
 }
+
+fmt.Println(CompactInPlace([]int{1, 1, 2, 3, 3, 3, 1})) // [1 2 3 1]: only consecutive duplicates go
 ```
 
 **Why this works:**
@@ -126,6 +135,10 @@ func CompactInPlace(s []int) []int {
 ### Optimized Solution: `DedupeFast`
 
 ```go
+import "gocourse/solutions/01-basics/exercises/dedupe"
+
+var Dedupe = dedupe.Dedupe // the readable version, for big inputs
+
 const smallDedupeLimit = 32
 
 func DedupeFast(s []string) []string {
@@ -143,6 +156,10 @@ outer:
 		out = append(out, v)
 	}
 	return out
+}
+
+func main() {
+	fmt.Println(DedupeFast([]string{"b", "a", "b", "c", "a"})) // [b a c]
 }
 ```
 
@@ -190,6 +207,12 @@ DedupeFast:
 ### Readable Solution: `TopN`
 
 ```go
+import "gocourse/solutions/01-basics/exercises/wordfreq"
+
+type WordCount = wordfreq.WordCount
+
+var Words = wordfreq.Words
+
 func TopN(text string, n int) []WordCount {
 	if n <= 0 {
 		return nil
@@ -210,6 +233,10 @@ func TopN(text string, n int) []WordCount {
 	})
 	return all[:min(n, len(all))]
 }
+
+func main() {
+	fmt.Println(TopN("the cat and the hat and the bat", 2)) // [{the 3} {and 2}]
+}
 ```
 
 **Why this works:**
@@ -221,11 +248,108 @@ func TopN(text string, n int) []WordCount {
 ### Optimized Solution: `TopNFast`
 
 ```go
-// Uses a min-heap of size n instead of sorting all m distinct words.
-// If n << m, reduces comparison work from O(m log m) to O(m log n).
-// Also avoids FieldsFunc allocation: scans the input by hand, lowercasing on demand.
+import "gocourse/solutions/01-basics/exercises/wordfreq"
+
+type WordCount = wordfreq.WordCount
+
+// TopNFast behaves exactly like TopN with fewer allocations and, when n is
+// much smaller than the number of distinct words, less sorting work.
+//
+//   - It lowercases once, then scans the lowered string by hand, counting
+//     each word as it is found instead of first materializing a []string of
+//     every word (FieldsFunc allocates one slice element per word).
+//   - ASCII bytes are classified with a cheap comparison; only multi-byte
+//     runes pay for UTF-8 decoding and the unicode tables.
+//   - Selection uses a size-n min-heap: O(m log n) for m distinct words
+//     instead of O(m log m) for a full sort, and only n results are kept.
 func TopNFast(text string, n int) []WordCount {
-	// ... [walks text manually, counting in map, building min-heap]
+	if n <= 0 {
+		return nil
+	}
+	lower := strings.ToLower(text) // returns text itself (no alloc) if already lower
+	counts := make(map[string]int)
+	start := -1
+	for i := 0; i < len(lower); {
+		c := lower[i]
+		var word bool
+		size := 1
+		if c < utf8.RuneSelf {
+			word = 'a' <= c && c <= 'z' || '0' <= c && c <= '9'
+		} else {
+			var r rune
+			r, size = utf8.DecodeRuneInString(lower[i:])
+			word = unicode.IsLetter(r) || unicode.IsDigit(r)
+		}
+		switch {
+		case word && start < 0:
+			start = i
+		case !word && start >= 0:
+			counts[lower[start:i]]++
+			start = -1
+		}
+		i += size
+	}
+	if start >= 0 {
+		counts[lower[start:]]++
+	}
+
+	// Fill the heap with the first n words, heapify once, then only replace
+	// the current worst. Appending directly (rather than heap.Push, whose
+	// `any` parameter boxes every WordCount) keeps this allocation-free.
+	h := make(minHeap, 0, min(n, len(counts)))
+	for w, c := range counts {
+		wc := WordCount{Word: w, Count: c}
+		switch {
+		case len(h) < n:
+			h = append(h, wc)
+			if len(h) == n {
+				heap.Init(&h)
+			}
+		case better(wc, h[0]):
+			h[0] = wc
+			heap.Fix(&h, 0)
+		}
+	}
+	// The heap holds the answer in "worst first" order; sort it for output.
+	slices.SortFunc(h, func(a, b WordCount) int {
+		if better(a, b) {
+			return -1
+		}
+		return 1 // distinct words never compare equal
+	})
+	if len(h) == 0 {
+		return nil
+	}
+	return h
+}
+
+// better reports whether a ranks ahead of b in TopN's output order.
+func better(a, b WordCount) bool {
+	if a.Count != b.Count {
+		return a.Count > b.Count
+	}
+	return a.Word < b.Word
+}
+
+// minHeap keeps the worst-ranked WordCount at index 0.
+type minHeap []WordCount
+
+func (h minHeap) Len() int           { return len(h) }
+func (h minHeap) Less(i, j int) bool { return better(h[j], h[i]) }
+func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+// Push and Pop complete heap.Interface; TopNFast never calls heap.Push or
+// heap.Pop, so they are never used, but the interface requires them.
+func (h *minHeap) Push(x any) { *h = append(*h, x.(WordCount)) }
+func (h *minHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+func main() {
+	fmt.Println(TopNFast("the cat and the hat and the bat", 2)) // [{the 3} {and 2}]
 }
 ```
 
@@ -289,6 +413,10 @@ func IsAnagram(a, b string) bool {
 func relevant(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
+
+fmt.Println(IsAnagram("Dormitory", "Dirty room!")) // true
+fmt.Println(IsAnagram("Éclair", "laicré"))         // true: Unicode case-folding
+fmt.Println(IsAnagram("abc", "abd"))               // false
 ```
 
 **Why this works:**
@@ -300,6 +428,10 @@ func relevant(r rune) bool {
 ### Optimized Solution: `IsAnagramFast`
 
 ```go
+import "gocourse/solutions/01-basics/exercises/anagram"
+
+var IsAnagram = anagram.IsAnagram // the readable, map-based version
+
 func IsAnagramFast(a, b string) bool {
 	var counts [36]int // 26 letters + 10 digits, stack-allocated
 	if !countASCII(&counts, a, 1) || !countASCII(&counts, b, -1) {
@@ -323,6 +455,11 @@ func countASCII(counts *[36]int, s string, delta int) bool {
 		}
 	}
 	return true
+}
+
+func main() {
+	fmt.Println(IsAnagramFast("Dormitory", "dirty room")) // true (ASCII fast path)
+	fmt.Println(IsAnagramFast("Éclair", "laicré"))         // true (falls back)
 }
 ```
 
@@ -374,6 +511,11 @@ func Chunk(s []int, size int) [][]int {
 	}
 	return chunks
 }
+
+chunks := Chunk([]int{1, 2, 3, 4, 5}, 2)
+fmt.Println(chunks) // [[1 2] [3 4] [5]]
+chunks[0] = append(chunks[0], 99) // capped: reallocates instead of overwriting 3
+fmt.Println(chunks) // [[1 2 99] [3 4] [5]]
 ```
 
 **Why this works:**
@@ -400,6 +542,12 @@ func RotateLeft(s []int, k int) {
 	copy(s, s[k:])
 	copy(s[n-k:], head)
 }
+
+s := []int{1, 2, 3, 4, 5}
+RotateLeft(s, 2)
+fmt.Println(s) // [3 4 5 1 2]
+RotateLeft(s, -1)
+fmt.Println(s) // [2 3 4 5 1]
 ```
 
 **Why this works:**
@@ -423,6 +571,10 @@ func RotateLeftFast(s []int, k int) {
 	slices.Reverse(s[k:])
 	slices.Reverse(s)
 }
+
+s := []int{1, 2, 3, 4, 5}
+RotateLeftFast(s, 2) // three reversals, no allocation
+fmt.Println(s) // [3 4 5 1 2]
 ```
 
 **Why it's faster:**
@@ -467,6 +619,16 @@ The readable version:
 3. **Sorts** all non-stopwords to find the top N.
 
 ```go
+import "gocourse/solutions/01-basics/project/textstats"
+
+type (
+	Options   = textstats.Options
+	Report    = textstats.Report
+	WordCount = textstats.WordCount
+)
+
+var Tokenize = textstats.Tokenize
+
 func Analyze(text string, opts Options) Report {
 	words := Tokenize(text)
 	var r Report
@@ -490,6 +652,38 @@ func Analyze(text string, opts Options) Report {
 	r.Top = topWords(counts, stopSet(opts.Stopwords), opts.TopN)
 	return r
 }
+
+// The two helpers, from textstats.go:
+
+func stopSet(words []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(words))
+	for _, w := range words {
+		set[strings.ToLower(w)] = struct{}{}
+	}
+	return set
+}
+
+func topWords(counts map[string]int, stop map[string]struct{}, n int) []WordCount {
+	if n <= 0 {
+		return nil
+	}
+	var all []WordCount
+	for w, c := range counts {
+		if _, ok := stop[w]; ok {
+			continue
+		}
+		all = append(all, WordCount{Word: w, Count: c})
+	}
+	slices.SortFunc(all, func(a, b WordCount) int {
+		return cmp.Or(cmp.Compare(b.Count, a.Count), strings.Compare(a.Word, b.Word))
+	})
+	return slices.Clone(all[:min(n, len(all))])
+}
+
+func main() {
+	text := "The quick brown fox jumps over the lazy dog. The fox naps."
+	fmt.Print(Analyze(text, Options{TopN: 3, Stopwords: textstats.DefaultStopwords}))
+}
 ```
 
 **Tokenization details:**
@@ -504,7 +698,7 @@ func Analyze(text string, opts Options) Report {
 2. **Interning:** words that are already lowercase and canonical are used as substrings of the input (zero-copy keys); words needing rewriting are allocated once and reused.
 3. **Single rune-count pass:** longest and average computed over distinct words, not per occurrence.
 
-```go
+```text
 // Lines of attack:
 // - Manual scanning avoids FieldsFunc allocation of []string
 // - Substring reuse (only allocate when a word needs rewriting)

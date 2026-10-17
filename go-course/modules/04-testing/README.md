@@ -83,6 +83,14 @@ func TestPages(t *testing.T) {
 		})
 	}
 }
+
+// Pages returns how many pages of perPage items hold total items.
+func Pages(total, perPage int) int {
+	if perPage <= 0 {
+		return 0
+	}
+	return (total + perPage - 1) / perPage
+}
 ```
 
 Why this shape wins:
@@ -114,13 +122,18 @@ fields at their zero value.
 The [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments#useful-test-failures)
 convention: **function, input, got, want**, in that order.
 
-```go
-// Good: tells you everything without opening the file.
-t.Errorf("Split(%q) = %q, want %q", line, got, want)
+```go expect=runtime-error
+// This test fails on purpose, so you can compare the messages.
+func TestMessages(t *testing.T) {
+	line, got, want := "a,b", []string{"a"}, []string{"a", "b"}
 
-// Bad: which input? which value is which?
-t.Errorf("wrong result")
-t.Errorf("expected %v but got %v", want, got) // backwards, no input
+	// Good: tells you everything without opening the file.
+	t.Errorf("Split(%q) = %q, want %q", line, got, want)
+
+	// Bad: which input? which value is which?
+	t.Errorf("wrong result")
+	t.Errorf("expected %v but got %v", want, got) // backwards, no input
+}
 ```
 
 Use `%q` for strings: it makes empty strings, spaces, quotes and newlines
@@ -149,18 +162,31 @@ func assertPages(t *testing.T, total, perPage, want int) {
 		t.Errorf("Pages(%d, %d) = %d, want %d", total, perPage, got, want)
 	}
 }
+
+func TestPagesHelper(t *testing.T) {
+	assertPages(t, 21, 10, 3)
+	assertPages(t, 0, 10, 0)
+	// Change a want above: the failure then names this line, not the helper's.
+}
+
+// Pages returns how many pages of perPage items hold total items.
+func Pages(total, perPage int) int {
+	if perPage <= 0 {
+		return 0
+	}
+	return (total + perPage - 1) / perPage
+}
 ```
 
 The `testing.T` toolbox for setup and teardown:
 
 ```go
 func TestImport(t *testing.T) {
-	dir := t.TempDir()             // fresh dir, removed after the test
-	t.Setenv("APP_MODE", "test")   // restored after the test
-	ctx := t.Context()             // Go 1.24: cancelled just before Cleanup funcs run
-	db := openTestDB(t, dir)       // a helper that registers its own cleanup
-	_ = ctx
-	_ = db
+	dir := t.TempDir()           // fresh dir, removed after the test
+	t.Setenv("APP_MODE", "test") // restored after the test
+	ctx := t.Context()           // Go 1.24: cancelled just before Cleanup funcs run
+	db := openTestDB(t, dir)     // a helper that registers its own cleanup
+	t.Logf("db at %s, mode %s, ctx err %v", db.path, os.Getenv("APP_MODE"), ctx.Err())
 }
 
 func openTestDB(t *testing.T, dir string) *DB {
@@ -172,6 +198,22 @@ func openTestDB(t *testing.T, dir string) *DB {
 	t.Cleanup(func() { db.Close() }) // runs when the *test* ends, not when this helper returns
 	return db
 }
+
+// A stand-in database: just a file.
+type DB struct {
+	path string
+	f    *os.File
+}
+
+func Open(path string) (*DB, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{path: path, f: f}, nil
+}
+
+func (db *DB) Close() error { return db.f.Close() }
 ```
 
 Why `t.Cleanup` instead of `defer`? A `defer` inside `openTestDB` would run
@@ -192,12 +234,31 @@ cases, the gain is negligible.
 func TestFetch(t *testing.T) {
 	srv := startFakeServer(t) // shared, read-only fixture
 	t.Cleanup(srv.Close)      // NOT defer, see below
+	tests := []struct{ name, path, want string }{
+		{"root", "/", "hello /"},
+		{"page", "/about", "hello /about"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			// ... use srv, tt
+			resp, err := http.Get(srv.URL + tt.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if got := string(body); got != tt.want {
+				t.Errorf("GET %s = %q, want %q", tt.path, got, tt.want)
+			}
 		})
 	}
+}
+
+func startFakeServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello %s", r.URL.Path)
+	}))
 }
 ```
 
@@ -230,7 +291,13 @@ import (
 
 func TestParse(t *testing.T) {
 	v, err := semver.Parse("1.2.3")
-	// ...
+	if err != nil {
+		t.Fatalf("Parse(%q) error: %v", "1.2.3", err)
+	}
+	if got := v.String(); got != "1.2.3" {
+		t.Errorf("Parse(%q).String() = %q, want %q", "1.2.3", got, "1.2.3")
+	}
+	// v.checkIdents(...) would not compile here: semver_test sees only the exported API.
 }
 ```
 
@@ -255,6 +322,15 @@ func (c *fakeClock) Now() time.Time          { return c.now }
 func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 
 var _ Clock = (*fakeClock)(nil) // compile-time check: fakeClock implements Clock
+
+func TestFakeClock(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)}
+	var c Clock = clk // production code only sees the interface
+	clk.Advance(90 * time.Minute)
+	if got := c.Now().Format("15:04"); got != "10:30" {
+		t.Errorf("Now() = %s, want 10:30", got)
+	}
+}
 ```
 
 A **fake** is a tiny working implementation: it records what happened, and the
@@ -301,6 +377,13 @@ func assertGolden(t *testing.T, path string, got []byte) {
 		t.Errorf("output differs from %s:\ngot:\n%s\nwant:\n%s", path, got, want)
 	}
 }
+
+func TestReport(t *testing.T) {
+	got := []byte("total: 3 items\n")
+	path := filepath.Join(t.TempDir(), "report.golden") // normally testdata/report.golden
+	os.WriteFile(path, []byte("total: 3 items\n"), 0o644) // as if a reviewed -update run made it
+	assertGolden(t, path, got)
+}
 ```
 
 The workflow:
@@ -320,6 +403,10 @@ line) that do not depend on the golden file.
 ### 8. Example functions
 
 ```go
+// This example uses the reference semver. Point the import at
+// gocourse/modules/04-testing/project/semver to check yours.
+import "gocourse/solutions/04-testing/project/semver"
+
 func ExampleCompare() {
 	a := semver.MustParse("1.0.0-rc.1")
 	b := semver.MustParse("1.0.0")
@@ -358,6 +445,13 @@ func FuzzReverse(f *testing.F) {
 			t.Errorf("Reverse(Reverse(%q)) = %q", s, got)
 		}
 	})
+}
+
+// Reverse reverses s rune by rune.
+func Reverse(s string) string {
+	r := []rune(s)
+	slices.Reverse(r)
+	return string(r)
 }
 ```
 
@@ -402,6 +496,15 @@ func BenchmarkJoin(b *testing.B) {
 		strings.Join(elems, ",")
 	}
 }
+
+// makeElems returns n strings of the given length.
+func makeElems(n, size int) []string {
+	elems := make([]string, n)
+	for i := range elems {
+		elems[i] = strings.Repeat("x", size)
+	}
+	return elems
+}
 ```
 
 ```bash
@@ -443,6 +546,31 @@ func TestJoinBuilderAllocatesOnce(t *testing.T) {
 		t.Errorf("JoinBuilder allocated %.1f times per call, want at most 1", n)
 	}
 }
+
+// JoinBuilder is strings.Join with one up-front allocation.
+func JoinBuilder(elems []string, sep string) string {
+	n := len(sep) * max(len(elems)-1, 0)
+	for _, e := range elems {
+		n += len(e)
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for i, e := range elems {
+		if i > 0 {
+			b.WriteString(sep)
+		}
+		b.WriteString(e)
+	}
+	return b.String()
+}
+
+func makeElems(n, size int) []string {
+	elems := make([]string, n)
+	for i := range elems {
+		elems[i] = strings.Repeat("x", size)
+	}
+	return elems
+}
 ```
 
 ### 11. Coverage
@@ -465,27 +593,102 @@ trivial code is rarely worth it.
 
 - **Table-driven + `t.Run`** for anything with more than two cases.
   ```go
-  // Good
-  for _, tt := range tests { t.Run(tt.name, func(t *testing.T) { ... }) }
-  // Bad
-  func TestPages1(t *testing.T) { ... }; func TestPages2(t *testing.T) { ... }
+  // Good: one table, one loop, named subtests
+  func TestPages(t *testing.T) {
+  	tests := []struct {
+  		name               string
+  		total, per, want int
+  	}{
+  		{"partial", 5, 10, 1},
+  		{"one over", 21, 10, 3},
+  	}
+  	for _, tt := range tests {
+  		t.Run(tt.name, func(t *testing.T) {
+  			if got := Pages(tt.total, tt.per); got != tt.want {
+  				t.Errorf("Pages(%d, %d) = %d, want %d", tt.total, tt.per, got, tt.want)
+  			}
+  		})
+  	}
+  }
+
+  // Bad: one function per case, copy-pasted
+  func TestPages1(t *testing.T) {
+  	if Pages(5, 10) != 1 {
+  		t.Error("fail")
+  	}
+  }
+  func TestPages2(t *testing.T) {
+  	if Pages(21, 10) != 3 {
+  		t.Error("fail")
+  	}
+  }
+
+  // Pages returns how many pages of perPage items hold total items.
+  func Pages(total, perPage int) int {
+  	if perPage <= 0 {
+  		return 0
+  	}
+  	return (total + perPage - 1) / perPage
+  }
   ```
 - **Function, input, got, want** in every failure message.
-  ```go
-  t.Errorf("Pages(%d, %d) = %d, want %d", total, per, got, want) // good
-  t.Errorf("got %d", got)                                        // bad
+  ```go expect=runtime-error
+  // Fails on purpose: compare the two messages.
+  func TestMessage(t *testing.T) {
+  	total, per, want := 21, 10, 3
+  	got := 2
+  	t.Errorf("Pages(%d, %d) = %d, want %d", total, per, got, want) // good
+  	t.Errorf("got %d", got)                                        // bad
+  }
   ```
 - **`t.Helper()` first line** of every helper that calls `t.Error*`/`t.Fatal*`.
 - **`t.Cleanup` in helpers**, never `defer` (a deferred close in a helper runs too early).
 - **`errors.Is` / `errors.As`** for errors.
   ```go
-  if !errors.Is(err, ErrInvalidPage) { ... } // good
-  if err.Error() != "page out of range" {}   // bad: breaks on rewording or wrapping
+  var ErrInvalidPage = errors.New("page out of range")
+
+  err := fmt.Errorf("bounds(total=5, page=3): %w", ErrInvalidPage)
+  fmt.Println(errors.Is(err, ErrInvalidPage))     // true: good
+  fmt.Println(err.Error() == "page out of range") // false: bad, breaks on rewording or wrapping
   ```
 - **Inject dependencies** (clock, sender, filesystem via `fs.FS`, `io.Writer`) instead of reaching for globals.
   ```go
-  s := New(clock, sender)                 // good: test passes fakes
-  func (s *Scheduler) Flush() { time.Now() } // bad: untestable boundary
+  type Clock interface{ Now() time.Time }
+  type Sender interface{ Send(to, body string) error }
+
+  type Scheduler struct {
+  	clock  Clock
+  	sender Sender
+  	due    time.Time
+  }
+
+  func New(clock Clock, sender Sender) *Scheduler { return &Scheduler{clock: clock, sender: sender} }
+
+  // Good: the time comes from the injected clock, so a test controls it.
+  func (s *Scheduler) Flush() error {
+  	if s.clock.Now().Before(s.due) {
+  		return nil
+  	}
+  	return s.sender.Send("ada", "time's up")
+  }
+
+  // Bad would be `if time.Now().Before(s.due)`: an untestable boundary.
+
+  // Fakes for a test:
+  type fixedClock time.Time
+
+  func (c fixedClock) Now() time.Time { return time.Time(c) }
+
+  type printSender struct{}
+
+  func (printSender) Send(to, body string) error { fmt.Println("to", to+":", body); return nil }
+
+  start := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+  s := New(fixedClock(start), printSender{}) // good: test passes fakes
+  s.due = start.Add(time.Hour)
+  s.Flush() // not due: prints nothing
+  s.clock = fixedClock(start.Add(2 * time.Hour))
+  s.Flush() // to ada: time's up
   ```
 - **Fakes over mocks**: assert on outcomes, not on call sequences.
 - **Test against an oracle** when one exists: `strings.Join`, the spec's example list, a slow reference implementation.
