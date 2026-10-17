@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +72,8 @@ func TestRun(t *testing.T) {
 		{"panic output", "var m map[string]int\nm[\"x\"] = 1", "assignment to entry in nil map", "run", ""},
 		{"compile error", "fmt.Println(undefinedThing)", "undefined: undefinedThing", "build", ""},
 		{"tests", "func TestOK(t *testing.T) {}", "--- PASS: TestOK", "run", ""},
-		{"external test package has no header", "package play_test\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) { undefinedThing() }", "./play_test.go", "build", ""},
-		{"test build error has no package header", "func TestX(t *testing.T) { undefinedThing() }", "./play_test.go", "build", ""},
+		{"external test package has no header", "package play_test\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) { undefinedThing() }", "play_test.go:", "build", ""},
+		{"test build error has no package header", "func TestX(t *testing.T) { undefinedThing() }", "play_test.go:", "build", ""},
 		{"imports course packages", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"gocourse/solutions/04-testing/project/semver\"\n)\n\nfunc main() {\n\tv, err := semver.Parse(\"1.2.3\")\n\tfmt.Println(v, err)\n}\n", "1.2.3", "run", ""},
 	}
 	for _, tt := range tests {
@@ -132,5 +133,20 @@ func TestExtractBlocks(t *testing.T) {
 	}
 	if got[1].line != 7 || got[1].expect != "compile-error" || got[1].code != "x := \n" {
 		t.Errorf("block 1 = %+v (the list indentation should be removed)", got[1])
+	}
+}
+
+func TestFixParsesCompilerOutput(t *testing.T) {
+	for name, out := range map[string]string{
+		"unix":    "# play\n./main.go:4:2: undefined: strings\n",
+		"windows": "# play\r\n.\\main.go:4:2: undefined: strings\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := parseSnippet(`fmt.Println(strings.ToUpper("go"))`)
+			var notes []string
+			if !s.fix(s.source(), out, &notes) || !slices.Contains(s.imports, "strings") {
+				t.Errorf("fix(%q) added imports %v, want strings", out, s.imports)
+			}
+		})
 	}
 }

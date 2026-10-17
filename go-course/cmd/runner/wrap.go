@@ -140,7 +140,9 @@ func (s *snippet) source() string {
 }
 
 var (
-	compileErr = regexp.MustCompile(`(?m)^\./\w+\.go:(\d+):\d+: (.*)$`)
+	// Compiler errors look like "./main.go:3:2: undefined: fmt", or
+	// ".\main.go:3:2: ..." on Windows.
+	compileErr = regexp.MustCompile(`(?m)^\.[/\\]\w+\.go:(\d+):\d+: (.*?)\r?$`)
 	undefined  = regexp.MustCompile(`^undefined: (\w+)$`)
 	unusedImp  = regexp.MustCompile(`^"([\w/]+)" imported and not used`)
 	unusedVar  = regexp.MustCompile(`^declared and not used: (\w+)$`)

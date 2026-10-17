@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +67,9 @@ func (e *executor) Run(ctx context.Context, code string) result {
 		return res
 	}
 	bin := filepath.Join(dir, "prog")
+	if runtime.GOOS == "windows" {
+		bin += ".exe" // Windows only runs files with an executable extension
+	}
 	for attempt := 0; ; attempt++ {
 		res.Program = s.source()
 		if err := os.WriteFile(filepath.Join(dir, s.filename()), []byte(res.Program), 0o644); err != nil {
@@ -125,7 +130,7 @@ func (e *executor) goMod() string {
 			goVersion = string(m[1])
 		}
 	}
-	return fmt.Sprintf("module play\n\ngo %s\n\nrequire gocourse v0.0.0\n\nreplace gocourse => %s\n", goVersion, e.root)
+	return fmt.Sprintf("module play\n\ngo %s\n\nrequire gocourse v0.0.0\n\nreplace gocourse => %s\n", goVersion, strconv.Quote(e.root)) // quoted: paths may contain spaces or backslashes
 }
 
 var goDirective = regexp.MustCompile(`(?m)^go\s+(\S+)`)
