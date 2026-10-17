@@ -1,0 +1,7 @@
+{
+  "name": "   ",
+  "listen": "localhost",
+  "timeout": "-5s",
+  "max_conns": 0,
+  "tags": ["ok", ""]
+}

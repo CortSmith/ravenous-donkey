@@ -1,0 +1,5 @@
+{"city":"London","email":"ada@example.com","id":"1","name":"Ada Lovelace","note":"First programmer, arguably"}
+{"city":"Arlington","email":"grace@example.com","id":"2","name":"Grace Hopper","note":"Said \"It's easier to ask forgiveness than it is to get permission.\""}
+{"city":"Sydney","email":"","id":"3","name":"Rob Pike","note":"Wrote \"Go Proverbs\"\nand co-created Go"}
+{"city":"東京","email":"koichi@example.jp","id":"4","name":"Kōichi Tanaka","note":""}
+{"city":"Berkeley, CA","email":"ken@example.com","id":"5","name":"Ken Thompson","note":"\u003cb\u003eUnix\u003c/b\u003e \u0026 B"}

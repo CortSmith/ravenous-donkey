@@ -1,0 +1,26 @@
+// VS Code / Dev Containers: "Reopen in Container" gives you an editor whose
+// terminal, gopls and test runner all use the course image (Go 1.24.2).
+// See modules/00-setup/README.md, "Option B".
+{
+  "name": "Go course (Go 1.24.2)",
+  "build": { "dockerfile": "../docker/Dockerfile" },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/course,type=bind",
+  "workspaceFolder": "/course",
+  "mounts": [
+    "source=gocourse-gomod,target=/cache/mod,type=volume",
+    "source=gocourse-gobuild,target=/cache/go-build,type=volume"
+  ],
+  // gopher (UID 1000) exists in the image; VS Code remaps it to your host UID.
+  // The image pins GOTOOLCHAIN=local. Current gopls needs a newer Go to *build*,
+  // so allow downloads here; the course itself still runs on go1.24.2 because
+  // go.mod asks for exactly that.
+  "containerEnv": { "GOTOOLCHAIN": "auto" },
+  "remoteUser": "gopher",
+  "updateRemoteUserUID": true,
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go"],
+      "settings": { "go.toolsManagement.autoUpdate": false }
+    }
+  }
+}

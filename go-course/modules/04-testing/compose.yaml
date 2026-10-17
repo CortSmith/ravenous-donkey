@@ -1,0 +1,69 @@
+# Module 04 in a container. From the course root:
+#
+#   docker compose -f modules/04-testing/compose.yaml run --rm test      # all tests, with -race
+#   docker compose -f modules/04-testing/compose.yaml run --rm vet       # gofmt + go vet
+#   docker compose -f modules/04-testing/compose.yaml run --rm bench     # benchmarks
+#   docker compose -f modules/04-testing/compose.yaml run --rm cover     # coverage summary
+#   docker compose -f modules/04-testing/compose.yaml run --rm shell     # a bash shell in /course
+#
+# Or cd into this directory and drop the -f flag. Setup: modules/00-setup/README.md.
+name: gocourse   # one project for all modules, so the cache volumes are shared without warnings
+
+x-go: &go
+  extends:
+    file: ../../docker/compose.base.yaml
+    service: go
+
+services:
+  test:
+    <<: *go
+    command: go test -race ./modules/04-testing/...
+
+  vet:
+    <<: *go
+    profiles: [tools]
+    command:
+      - sh
+      - -c
+      - test -z "$$(gofmt -l modules/04-testing)" && go vet ./modules/04-testing/... && echo "gofmt and vet are clean"
+
+  bench:
+    <<: *go
+    profiles: [tools]
+    command: go test -run='^$$' -bench=. -benchmem ./modules/04-testing/...
+
+  cover:
+    <<: *go
+    profiles: [tools]
+    command: go test -cover ./modules/04-testing/...
+
+  shell:
+    <<: *go
+    profiles: [tools]
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # For the instructor: the reference solutions must pass.
+  solutions:
+    <<: *go
+    profiles: [instructor]
+    command: go test -race ./solutions/04-testing/...
+
+  # Fuzz one target. Defaults to csvline's FuzzRoundTrip; override with e.g.
+  #   FUZZ_PKG=csvline FUZZ_TARGET=FuzzSplit docker compose run --rm fuzz
+  #   FUZZ_PKG=../project/semver FUZZ_TARGET=FuzzParse FUZZ_TIME=30s docker compose run --rm fuzz
+  # The fuzzer writes failing inputs to testdata/fuzz/ in your package (as your user).
+  fuzz:
+    <<: *go
+    profiles: [tools]
+    command:
+      - sh
+      - -c
+      - go test ./modules/04-testing/exercises/${FUZZ_PKG:-csvline}/ -run='^$$' -fuzz='^${FUZZ_TARGET:-FuzzRoundTrip}$$' -fuzztime=${FUZZ_TIME:-20s}
+
+volumes:
+  gomod:
+    name: gocourse-gomod
+  gobuild:
+    name: gocourse-gobuild

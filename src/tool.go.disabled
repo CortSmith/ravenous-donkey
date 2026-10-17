@@ -1,0 +1,50 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+)
+
+var nFlag int;
+var nameFlag string;
+
+func requiredFlags(required []string) {
+  seen := make(map[string]bool)
+  flag.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+  
+  var missing []string;
+  for _, name := range required {
+    if !seen[name] {
+      missing = append(missing, name)
+    }
+  }
+
+  if len(missing) > 0 {
+    fmt.Fprintf(os.Stderr, "missing required: %v\n", missing)
+    flag.Usage()
+    os.Exit(2)
+  }
+}
+
+func init() {
+  flag.IntVar(&nFlag, "n", 1234, "random number")
+  flag.StringVar(&nameFlag, "name", "world", "random name")
+  flag.Parse()
+
+  requiredFlags([]string{"n", "name"})
+
+  var input = flag.String("input", "", "input file (required)")
+  var output = flag.String("output", "", "output file (required)")
+  var verbose = flag.Bool("verbose", false, "verbose mode")
+
+  fmt.Printf("input=%s output=%s verbose=%v\n", *input, *output, *verbose)
+}
+
+func run() {}
+
+func main() {
+  fmt.Println(fmt.Sprintf("Hello, %s!", nameFlag));
+
+  fmt.Println(nFlag)
+}

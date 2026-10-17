@@ -1,0 +1,22 @@
+# Sample transaction file for the ledger project.
+# Amounts are decimal with at most two fraction digits.
+
+open alice 100.00
+open bob
+open carol 5.5
+
+deposit alice 25.50
+transfer alice bob 40
+withdraw bob 10
+transfer carol alice 1.25
+
+# Problems below: each line fails, processing continues.
+withdraw carol 100
+deposit dave 5
+open alice 1
+transfer bob bob 1
+deposit bob -3
+refund alice 2
+transfer alice bob
+
+withdraw bob 0.5

@@ -1,0 +1,36 @@
+# Course-wide container tasks. Per-module tasks live in modules/NN-*/compose.yaml.
+#
+#   docker compose run --rm shell       # bash in /course with Go 1.24.2
+#   docker compose run --rm verify      # the course health check (scripts-verify.sh)
+#   docker compose run --rm solutions   # every reference solution, with -race
+#
+# Setup and explanations: modules/00-setup/README.md.
+name: gocourse
+
+x-go: &go
+  extends:
+    file: docker/compose.base.yaml
+    service: go
+
+services:
+  shell:
+    <<: *go
+    stdin_open: true
+    tty: true
+    command: bash
+
+  verify:
+    <<: *go
+    profiles: [instructor]
+    command: ./scripts-verify.sh
+
+  solutions:
+    <<: *go
+    profiles: [instructor]
+    command: go test -race ./solutions/...
+
+volumes:
+  gomod:
+    name: gocourse-gomod
+  gobuild:
+    name: gocourse-gobuild

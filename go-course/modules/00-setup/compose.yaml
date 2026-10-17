@@ -1,0 +1,48 @@
+# Module 00 in a container. From the course root:
+#
+#   docker compose -f modules/00-setup/compose.yaml run --rm test
+#   docker compose -f modules/00-setup/compose.yaml run --rm envcheck
+#
+# Or cd into this directory and drop the -f flag.
+name: gocourse   # one project for all modules, so the cache volumes are shared without warnings
+
+x-go: &go
+  extends:
+    file: ../../docker/compose.base.yaml
+    service: go
+
+services:
+  test:
+    <<: *go
+    command: go test -race ./modules/00-setup/...
+
+  vet:
+    <<: *go
+    profiles: [tools]
+    command:
+      - sh
+      - -c
+      - test -z "$$(gofmt -l modules/00-setup)" && go vet ./modules/00-setup/... && echo "gofmt and vet are clean"
+
+  envcheck:
+    <<: *go
+    profiles: [tools]
+    command: go run ./modules/00-setup/project/cmd/envcheck -v
+
+  shell:
+    <<: *go
+    profiles: [tools]
+    stdin_open: true
+    tty: true
+    command: bash
+
+  solutions:
+    <<: *go
+    profiles: [instructor]
+    command: go test -race ./solutions/00-setup/...
+
+volumes:
+  gomod:
+    name: gocourse-gomod
+  gobuild:
+    name: gocourse-gobuild

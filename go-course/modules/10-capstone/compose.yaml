@@ -1,0 +1,98 @@
+# Module 10 in a container. From the course root:
+#
+#   docker compose -f modules/10-capstone/compose.yaml run --rm test      # all tests, with -race
+#   docker compose -f modules/10-capstone/compose.yaml run --rm vet       # gofmt + go vet
+#   docker compose -f modules/10-capstone/compose.yaml run --rm bench     # benchmarks
+#   docker compose -f modules/10-capstone/compose.yaml run --rm cover     # coverage summary
+#   docker compose -f modules/10-capstone/compose.yaml run --rm shell     # a bash shell in /course
+#
+# Or cd into this directory and drop the -f flag. Setup: modules/00-setup/README.md.
+name: gocourse   # one project for all modules, so the cache volumes are shared without warnings
+
+x-go: &go
+  extends:
+    file: ../../docker/compose.base.yaml
+    service: go
+
+services:
+  test:
+    <<: *go
+    command: go test -race ./modules/10-capstone/...
+
+  vet:
+    <<: *go
+    profiles: [tools]
+    command:
+      - sh
+      - -c
+      - test -z "$$(gofmt -l modules/10-capstone)" && go vet ./modules/10-capstone/... && echo "gofmt and vet are clean"
+
+  bench:
+    <<: *go
+    profiles: [tools]
+    command: go test -run='^$$' -bench=. -benchmem ./modules/10-capstone/...
+
+  cover:
+    <<: *go
+    profiles: [tools]
+    command: go test -cover ./modules/10-capstone/...
+
+  shell:
+    <<: *go
+    profiles: [tools]
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # For the instructor: the reference solutions must pass.
+  solutions:
+    <<: *go
+    profiles: [instructor]
+    command: go test -race ./solutions/10-capstone/...
+
+  # The kvd server from milestone 3, built from YOUR code, on localhost:8080.
+  #   docker compose --profile app up kvd      (Ctrl-C or `docker compose stop kvd`
+  #                                             sends SIGTERM: watch the graceful shutdown)
+  #   curl -X PUT -d '{"value":"hi"}' localhost:8080/kv/greeting
+  # `exec` makes kvd PID 1 so it receives SIGTERM directly. Data persists in the
+  # gocourse-kvd-data volume across restarts.
+  kvd:
+    <<: *go
+    profiles: [app]
+    ports: ["127.0.0.1:8080:8080"]
+    stop_grace_period: 10s
+    volumes:
+      - ../..:/course
+      - gomod:/cache/mod
+      - gobuild:/cache/go-build
+      - kvd-data:/data
+    command:
+      - sh
+      - -c
+      - go build -o /tmp/kvd ./modules/10-capstone/milestone3/cmd/kvd && exec /tmp/kvd -addr 0.0.0.0:8080 -db /data/kvd.log
+
+  # The reference solution's server on localhost:8081, for comparison.
+  kvd-solution:
+    <<: *go
+    profiles: [instructor]
+    ports: ["127.0.0.1:8081:8080"]
+    stop_grace_period: 10s
+    volumes:
+      - ../..:/course
+      - gomod:/cache/mod
+      - gobuild:/cache/go-build
+      - kvd-solution-data:/data
+    command:
+      - sh
+      - -c
+      - go build -o /tmp/kvd ./solutions/10-capstone/milestone3/cmd/kvd && exec /tmp/kvd -addr 0.0.0.0:8080 -db /data/kvd.log
+
+volumes:
+  gomod:
+    name: gocourse-gomod
+  gobuild:
+    name: gocourse-gobuild
+  kvd-data:
+    name: gocourse-kvd-data
+  kvd-solution-data:
+    name: gocourse-kvd-solution-data

@@ -1,0 +1,57 @@
+# Module 06 in a container. From the course root:
+#
+#   docker compose -f modules/06-generics/compose.yaml run --rm test      # all tests, with -race
+#   docker compose -f modules/06-generics/compose.yaml run --rm vet       # gofmt + go vet
+#   docker compose -f modules/06-generics/compose.yaml run --rm bench     # benchmarks
+#   docker compose -f modules/06-generics/compose.yaml run --rm cover     # coverage summary
+#   docker compose -f modules/06-generics/compose.yaml run --rm shell     # a bash shell in /course
+#
+# Or cd into this directory and drop the -f flag. Setup: modules/00-setup/README.md.
+name: gocourse   # one project for all modules, so the cache volumes are shared without warnings
+
+x-go: &go
+  extends:
+    file: ../../docker/compose.base.yaml
+    service: go
+
+services:
+  test:
+    <<: *go
+    command: go test -race ./modules/06-generics/...
+
+  vet:
+    <<: *go
+    profiles: [tools]
+    command:
+      - sh
+      - -c
+      - test -z "$$(gofmt -l modules/06-generics)" && go vet ./modules/06-generics/... && echo "gofmt and vet are clean"
+
+  bench:
+    <<: *go
+    profiles: [tools]
+    command: go test -run='^$$' -bench=. -benchmem ./modules/06-generics/...
+
+  cover:
+    <<: *go
+    profiles: [tools]
+    command: go test -cover ./modules/06-generics/...
+
+  shell:
+    <<: *go
+    profiles: [tools]
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # For the instructor: the reference solutions must pass.
+  solutions:
+    <<: *go
+    profiles: [instructor]
+    command: go test -race ./solutions/06-generics/...
+
+volumes:
+  gomod:
+    name: gocourse-gomod
+  gobuild:
+    name: gocourse-gobuild

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go, Hands-On</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
+<style>
+:root {
+  --bg: #fbfaf8; --panel: #f2f0ec; --text: #1d1f23; --muted: #646a73; --line: #dedad3;
+  --accent: #007d9c; --accent-soft: #e0f1f5; --code: #f4f2ee; --done: #2e7d32; --warn: #a15c00;
+  --sidebar: 300px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a; --panel: #1c1f23; --text: #e4e6e9; --muted: #9aa1ab; --line: #2e3238;
+    --accent: #4fc3e0; --accent-soft: #163640; --code: #1f2226; --done: #66bb6a; --warn: #f0a640;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; }
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+
+/* sidebar */
+#side { width: var(--sidebar); flex: none; height: 100vh; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--line); padding: 16px 12px 40px; }
+#side h1 { font-size: 17px; margin: 0 4px 2px; }
+#side .sub { color: var(--muted); font-size: 12px; margin: 0 4px 12px; }
+#overall { margin: 0 4px 12px; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--done); width: 0; transition: width .3s; }
+#overall small { color: var(--muted); font-size: 12px; }
+#filter { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); margin-bottom: 10px; font: inherit; font-size: 13px; }
+.nav a { display: block; text-decoration: none; color: var(--text); padding: 3px 8px; border-radius: 5px; font-size: 13.5px; }
+.nav a:hover { background: var(--accent-soft); }
+.nav a.active { background: var(--accent); color: #fff; }
+.nav .top { font-weight: 600; }
+details.mod { margin: 2px 0; }
+details.mod > summary { cursor: pointer; list-style: none; padding: 4px 8px; border-radius: 5px; font-size: 13.5px; font-weight: 600; display: flex; gap: 6px; align-items: baseline; }
+details.mod > summary::-webkit-details-marker { display: none; }
+details.mod > summary::before { content: "▸"; color: var(--muted); font-size: 11px; transition: transform .15s; }
+details.mod[open] > summary::before { transform: rotate(90deg); }
+details.mod > summary:hover { background: var(--accent-soft); }
+summary .count { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; }
+summary .count.full { color: var(--done); }
+.mod .items { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
+.items a .tick { display: inline-block; width: 14px; color: var(--done); }
+.items .kind { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 6px 8px 0; }
+
+/* main */
+#main { flex: 1; height: 100vh; overflow-y: auto; }
+#content { max-width: 880px; margin: 0 auto; padding: 28px 40px 80px; }
+.crumbs { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+.crumbs a { color: var(--muted); }
+#content h1 { font-size: 28px; line-height: 1.25; margin: 0 0 16px; }
+#content h2 { font-size: 21px; margin-top: 2em; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+#content h3 { font-size: 17px; margin-top: 1.6em; }
+#content pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.45; }
+#content :not(pre) > code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+#content table { border-collapse: collapse; display: block; overflow-x: auto; margin: 1em 0; }
+#content th, #content td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+#content th { background: var(--panel); }
+#content blockquote { margin: 1em 0; padding: 4px 16px; border-left: 4px solid var(--accent); background: var(--accent-soft); border-radius: 0 6px 6px 0; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; margin: 16px 0; background: var(--panel); }
+.card h3 { margin: 0 0 8px; font-size: 15px; }
+.cmd { display: flex; gap: 8px; align-items: stretch; margin: 6px 0; }
+.cmd code { flex: 1; min-width: 0; background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; overflow-x: auto; white-space: nowrap; }
+button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.doc { white-space: pre-wrap; font-family: inherit; margin: 0; }
+.files { list-style: none; padding: 0; margin: 0; columns: 2; }
+.files li { font-size: 13px; padding: 1px 0; break-inside: avoid; }
+.done-toggle { display: inline-flex; gap: 8px; align-items: center; font-weight: 600; cursor: pointer; user-select: none; }
+.done-toggle input { width: 18px; height: 18px; accent-color: var(--done); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin: 16px 0; }
+.grid a.tile { display: block; text-decoration: none; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--panel); }
+.grid a.tile:hover { border-color: var(--accent); }
+.tile .num { color: var(--accent); font-weight: 700; font-size: 12px; }
+.tile .t { font-weight: 600; margin: 2px 0 8px; }
+.toc { font-size: 13px; margin: 0 0 20px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 8px; }
+.toc strong { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.toc ol { margin: 4px 0 0; padding-left: 20px; }
+.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); }
+.pager a { text-decoration: none; max-width: 48%; }
+.pager small { display: block; color: var(--muted); font-size: 12px; }
+.warn { border-color: var(--warn); }
+.warn h3 { color: var(--warn); }
+.offline { color: var(--warn); font-size: 13px; }
+#menu { display: none; }
+.hljs-keyword, .hljs-built_in { color: #a626a4; } .hljs-string { color: #50a14f; } .hljs-comment { color: var(--muted); font-style: italic; }
+.hljs-number, .hljs-literal { color: #986801; } .hljs-title, .hljs-title.function_ { color: #4078f2; } .hljs-type { color: #c18401; }
+@media (prefers-color-scheme: dark) {
+  .hljs-keyword, .hljs-built_in { color: #c678dd; } .hljs-string { color: #98c379; } .hljs-number, .hljs-literal { color: #d19a66; }
+  .hljs-title, .hljs-title.function_ { color: #61afef; } .hljs-type { color: #e5c07b; }
+}
+@media (max-width: 800px) {
+  body { display: block; }
+  #side { position: fixed; z-index: 10; left: 0; top: 0; transform: translateX(-100%); transition: transform .2s; width: 85vw; }
+  body.nav-open #side { transform: none; }
+  #main { height: auto; }
+  #content { padding: 56px 16px 60px; }
+  #menu { display: block; position: fixed; top: 10px; left: 10px; z-index: 11; }
+  .files { columns: 1; }
+}
+</style>
+</head>
+<body>
+<button id="menu" aria-label="Toggle navigation">☰ Menu</button>
+<nav id="side">
+  <h1>Go, Hands-On</h1>
+  <div class="sub">Go 1.24 · stdlib only · instructor-reviewed</div>
+  <div id="overall"><div class="bar"><i></i></div><small></small></div>
+  <input id="filter" type="search" placeholder="Filter modules & exercises…">
+  <div class="nav" id="nav"></div>
+</nav>
+<main id="main"><div id="content"></div></main>
+
+<script>
+const DATA = /*__DATA__*/null;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fileURL = p => "file://" + encodeURI(p);
+
+// ---------- persistence (per-browser progress) ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("gocourse:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("gocourse:" + k, JSON.stringify(v)); } catch {} },
+};
+let done = store.get("done", {});
+const isDone = id => !!done[id];
+function setDone(id, v) { if (v) done[id] = true; else delete done[id]; store.set("done", done); renderNav(); renderProgress(); }
+
+// ---------- markdown ----------
+const hasMarked = typeof marked !== "undefined";
+function md(text) {
+  if (!hasMarked) return `<p class="offline">Offline: showing plain text (the Markdown renderer loads from cdnjs).</p><pre>${esc(text)}</pre>`;
+  return marked.parse(text, { gfm: true });
+}
+function enhance(el, baseDir) {
+  // syntax highlighting
+  if (typeof hljs !== "undefined") el.querySelectorAll("pre code").forEach(c => {
+    if (!c.className || /language-(go|bash|sh)/.test(c.className)) { try { hljs.highlightElement(c); } catch {} }
+  });
+  // heading ids
+  el.querySelectorAll("h2, h3").forEach(h => { if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); });
+  // relative links → in-app routes or file:// paths
+  el.querySelectorAll("a[href]").forEach(a => {
+    const href = a.getAttribute("href");
+    if (/^(https?:|mailto:|#)/.test(href)) { if (/^https?:/.test(href)) a.target = "_blank"; return; }
+    const abs = resolvePath(baseDir, href);
+    const route = routeForPath(abs);
+    a.href = route || fileURL(abs);
+  });
+}
+function resolvePath(base, rel) {
+  const parts = (base + "/" + rel).split("/"), out = [];
+  for (const p of parts) { if (p === "..") out.pop(); else if (p && p !== ".") out.push(p); }
+  return "/" + out.join("/");
+}
+function routeForPath(abs) {
+  const p = abs.replace(/\/README\.md$/, "").replace(/\/$/, "");
+  for (const m of DATA.modules) {
+    if (p === m.dir) return `#/m/${m.slug}`;
+    for (const u of m.units) if (p === u.dir) return `#/m/${m.slug}/u/${u.name}`;
+  }
+  if (p === DATA.root) return "#/";
+  if (abs === DATA.root + "/docs/RESOURCES.md") return "#/resources";
+  return null;
+}
+
+// ---------- navigation ----------
+function unitLabel(u) { return u.kind === "project" ? "Project" : u.kind === "milestone" ? u.name.replace("milestone", "Milestone ") : u.name; }
+function modShort(m) { return m.title.replace(/^Module\s+\d+\s*[:—-]\s*/i, ""); }
+function modNum(m) { return m.slug.slice(0, 2); }
+function modDone(m) { return m.units.filter(u => isDone(u.id)).length; }
+
+function renderNav() {
+  const q = $("#filter").value.trim().toLowerCase();
+  const cur = location.hash;
+  const open = store.get("open", {});
+  let h = `<a class="top ${cur === "#/" || cur === "" ? "active" : ""}" href="#/">Home &amp; syllabus</a>
+           <a class="top ${cur === "#/howto" ? "active" : ""}" href="#/howto">How to study</a>
+           <a class="top ${cur === "#/resources" ? "active" : ""}" href="#/resources">Resources</a>`;
+  for (const m of DATA.modules) {
+    const hay = (m.slug + " " + m.title + " " + m.units.map(u => u.name).join(" ")).toLowerCase();
+    if (q && !hay.includes(q)) continue;
+    const n = modDone(m), t = m.units.length;
+    const isOpen = q || open[m.slug] || cur.startsWith(`#/m/${m.slug}`);
+    const a = (href, label, tick) => `<a href="${href}" class="${cur === href ? "active" : ""}"><span class="tick">${tick ? "✓" : ""}</span>${label}</a>`;
+    const ex = m.units.filter(u => u.kind === "exercise"), rest = m.units.filter(u => u.kind !== "exercise");
+    h += `<details class="mod" data-slug="${m.slug}" ${isOpen ? "open" : ""}>
+      <summary>${modNum(m)} ${esc(modShort(m))}<span class="count ${n === t ? "full" : ""}">${n}/${t}</span></summary>
+      <div class="items">
+        ${a(`#/m/${m.slug}`, "Lesson", false)}
+        ${ex.length ? `<div class="kind">Exercises</div>` + ex.map(u => a(`#/m/${m.slug}/u/${u.name}`, esc(unitLabel(u)), isDone(u.id))).join("") : ""}
+        ${rest.length ? `<div class="kind">${rest[0].kind === "milestone" ? "Milestones" : "Project"}</div>` + rest.map(u => a(`#/m/${m.slug}/u/${u.name}`, esc(unitLabel(u)), isDone(u.id))).join("") : ""}
+        <div class="kind">After you're done</div>
+        ${a(`#/m/${m.slug}/review`, "Instructor review 🔒", false)}
+      </div></details>`;
+  }
+  $("#nav").innerHTML = h;
+  $("#nav").querySelectorAll("details.mod").forEach(d => d.addEventListener("toggle", () => {
+    const o = store.get("open", {}); o[d.dataset.slug] = d.open; store.set("open", o);
+  }));
+}
+function renderProgress() {
+  const all = DATA.modules.flatMap(m => m.units), n = all.filter(u => isDone(u.id)).length;
+  $("#overall i").style.width = (100 * n / all.length) + "%";
+  $("#overall small").textContent = `${n} of ${all.length} exercises & projects done`;
+}
+
+// ---------- pages ----------
+const C = () => $("#content");
+const crumbs = (...xs) => `<div class="crumbs">${xs.join(" › ")}</div>`;
+
+// flat order for prev/next
+function sequence() {
+  const seq = [];
+  for (const m of DATA.modules) {
+    seq.push({ href: `#/m/${m.slug}`, label: `${modNum(m)} · Lesson` });
+    for (const u of m.units) seq.push({ href: `#/m/${m.slug}/u/${u.name}`, label: `${modNum(m)} · ${unitLabel(u)}` });
+  }
+  return seq;
+}
+function pager(href) {
+  const s = sequence(), i = s.findIndex(x => x.href === href);
+  if (i < 0) return "";
+  const p = s[i - 1], n = s[i + 1];
+  return `<div class="pager">${p ? `<a href="${p.href}"><small>← Previous</small>${esc(p.label)}</a>` : "<span></span>"}
+          ${n ? `<a href="${n.href}" style="text-align:right"><small>Next →</small>${esc(n.label)}</a>` : ""}</div>`;
+}
+function toc(el) {
+  const hs = [...el.querySelectorAll("h2")];
+  if (hs.length < 3) return;
+  const box = document.createElement("div");
+  box.className = "toc";
+  box.innerHTML = `<strong>On this page</strong><ol>${hs.map(h => `<li><a href="#${h.id}" data-anchor>${esc(h.textContent)}</a></li>`).join("")}</ol>`;
+  const h1 = el.querySelector("h1");
+  (h1 ? h1.after(box) : el.prepend(box));
+}
+
+function cmdRows(cmds) {
+  return cmds.map(c => `<div class="cmd"><code>${esc(c)}</code><button data-copy="${esc(c)}">Copy</button></div>`).join("");
+}
+function composeCard(m) {
+  if (!m.compose) return "";
+  const desc = { test: "all tests, with -race", vet: "gofmt + go vet", bench: "benchmarks", cover: "coverage", shell: "bash with Go 1.24.2",
+    envcheck: "run your envcheck -v", fuzz: "fuzz a target (FUZZ_PKG / FUZZ_TARGET / FUZZ_TIME)", kvd: "your kvd server on localhost:8080",
+    solutions: "reference solutions (instructor)", "kvd-solution": "reference kvd on localhost:8081 (instructor)" };
+  const rows = m.services.map(sv => {
+    const cmd = sv === "kvd" ? `docker compose -f ${m.compose} --profile app up kvd`
+      : sv === "kvd-solution" ? `docker compose -f ${m.compose} --profile instructor up kvd-solution`
+      : `docker compose -f ${m.compose} run --rm ${sv}`;
+    return `<div class="cmd"><code>${esc(cmd)}</code><button data-copy="${esc(cmd)}">Copy</button></div>
+      <div style="font-size:12px;color:var(--muted);margin:-2px 0 6px 2px">${esc(desc[sv] || sv)}</div>`;
+  }).join("");
+  return `<div class="card"><h3>Run this module in a container</h3>${rows}
+    <p style="font-size:12.5px;color:var(--muted);margin:6px 0 0">File: <a href="${fileURL(DATA.root + "/" + m.compose)}" target="_blank">${esc(m.compose)}</a>.
+    Setup: <a href="#/m/00-setup">module 00, Option B</a>.</p></div>`;
+}
+function pageHome() {
+  const tiles = DATA.modules.map(m => {
+    const n = modDone(m), t = m.units.length;
+    return `<a class="tile" href="#/m/${m.slug}"><div class="num">MODULE ${modNum(m)}</div><div class="t">${esc(modShort(m))}</div>
+      <div class="bar"><i style="width:${100 * n / t}%"></i></div><small style="color:var(--muted)">${n}/${t} done</small></a>`;
+  }).join("");
+  C().innerHTML = `<h1>Go, Hands-On</h1>
+    <p>New here? Start with <a href="#/m/00-setup">module 00: Setup &amp; First Program</a>. It installs Go on your machine or sets up the course container, and you can use either for the rest of the course.
+    Tick an exercise off on its page once its tests pass and it has been reviewed.</p>
+    <div class="grid">${tiles}</div><div id="md"></div>`;
+  const el = $("#md"); el.innerHTML = md(DATA.readme.replace(/^#\s.+\n/, "")); enhance(el, DATA.root);
+}
+function pageHowto() {
+  C().innerHTML = `<h1>How to study this course</h1><div id="md"></div>`;
+  const el = $("#md");
+  el.innerHTML = md(`**First, module 00.** Set up Go on your host (Option A) or run everything in the course container with Docker Compose (Option B). Every module page shows the commands for both.
+
+For every module, repeat this loop:
+
+1. **Read the lesson.** Type out and run any snippet you don't fully understand. Skim *Idioms* and *Common Pitfalls* now, and re-read them before asking for a review.
+2. **Do the exercises.** The tests are already written: read the \`_test.go\` file first, because it is the spec. Make the tests pass, then run \`gofmt -l\` and \`go vet\`. Time-box each exercise to about twice the suggested time, then ask Claude for a *hint*, not the answer.
+3. **Do the project** (≤ 60 min). Sketch your types and functions for 5 minutes before you write code.
+4. **Ask for a review:** *"Review my work in modules/01-basics/"*. Fix the important items before moving on.
+5. **Then unlock the instructor review** (the 🔒 link at the bottom of each module) and compare it with your code.
+
+**Modules that work differently**
+
+- **04 Testing is inverted:** the code has planted bugs and *you* write the tests. Write each test before you fix anything, and watch it fail.
+- **09 Performance:** measure before and after every change with \`-bench\` and \`-benchmem\`. Never guess.
+- **10 Capstone:** three one-hour milestones that build a real server.
+
+**Order:** do 00–03 in order. Do 04 after 03. 05 and 06 can go in either order. 07–10 build on everything before them.
+
+**Habits:** don't peek at solutions early. Keep a short log of mistakes you repeat and re-read it before each review. Ask *why* whenever a review comment doesn't make sense.`);
+  enhance(el, DATA.root);
+}
+function pageResources() {
+  C().innerHTML = crumbs(`<a href="#/">Home</a>`) + `<div id="md"></div>`;
+  const el = $("#md"); el.innerHTML = md(DATA.resources); enhance(el, DATA.root + "/docs");
+}
+function pageLesson(m) {
+  const units = m.units.map(u => `<li><a href="#/m/${m.slug}/u/${u.name}">${isDone(u.id) ? "✓ " : ""}${esc(unitLabel(u))}</a></li>`).join("");
+  C().innerHTML = crumbs(`<a href="#/">Home</a>`, `Module ${modNum(m)}`) +
+    `<div id="md"></div>
+     <div class="card"><h3>In this module</h3><ul>${units}</ul>
+     <p style="margin:6px 0 0;font-size:13px">Folder: <a href="${fileURL(m.dir)}">${esc(m.dir)}</a></p></div>` + composeCard(m) + pager(`#/m/${m.slug}`);
+  const el = $("#md"); el.innerHTML = md(m.lesson); enhance(el, m.dir); toc(el);
+}
+function pageUnit(m, u) {
+  const href = `#/m/${m.slug}/u/${u.name}`;
+  const fileList = u.files.map(f => `<li><a href="${fileURL(f.path)}" target="_blank">${esc(f.name)}</a>${f.name.endsWith("_test.go") ? " <small style='color:var(--muted)'>(tests)</small>" : ""}</li>`).join("");
+  const rel = u.dir.replace(DATA.root + "/", "");
+  const cmds = [u.cmd, `go test -v ${u.cmd.replace(/^go test (-race )?/, "")}`, `gofmt -l ${u.dir.replace(DATA.root + "/", "")} && go vet ./${u.dir.replace(DATA.root + "/", "")}/...`];
+  C().innerHTML = crumbs(`<a href="#/">Home</a>`, `<a href="#/m/${m.slug}">Module ${modNum(m)}</a>`, u.kind) +
+    `<h1>${esc(unitLabel(u))} <small style="color:var(--muted);font-weight:400;font-size:16px">· ${esc(modShort(m))}</small></h1>
+     <label class="done-toggle"><input type="checkbox" id="donebox" ${isDone(u.id) ? "checked" : ""}> Done (tests pass and reviewed)</label>
+     <div class="card"><h3>On your host (from the course root)</h3>
+       ${cmdRows(cmds)}
+       <p style="font-size:12.5px;color:var(--muted);margin:6px 0 0">Course root: <code>${esc(DATA.root)}</code></p></div>
+     ${m.compose ? `<div class="card"><h3>In the container</h3>
+       ${cmdRows([`docker compose -f ${m.compose} run --rm test go test -race ./${rel}/...`,
+                  `docker compose -f ${m.compose} run --rm test go test -race -v ./${rel}/...`,
+                  `docker compose -f ${m.compose} run --rm vet`])}
+       <p style="font-size:12.5px;color:var(--muted);margin:6px 0 0">Setup: <a href="#/m/00-setup">module 00, Option B</a>. The first run builds the image.</p></div>` : ""}
+     ${u.doc ? `<div class="card"><h3>What to build</h3><pre class="doc">${esc(u.doc)}</pre>
+        <p style="font-size:13px;margin:8px 0 0">The full spec is in the doc comments and the tests. Open the files below, then the lesson's <a href="#/m/${m.slug}">Exercises section</a>.</p></div>` : ""}
+     <div class="card"><h3>Files</h3><ul class="files">${fileList}</ul>
+       <p style="font-size:12.5px;color:var(--muted);margin:8px 0 0">These links open read-only views in the browser. Edit the files in your editor: <code>${esc(u.dir)}</code></p></div>
+     <div id="md"></div>` + pager(href);
+  const el = $("#md");
+  if (u.readme) { el.innerHTML = md(u.readme); enhance(el, u.dir); toc(el); }
+  $("#donebox").addEventListener("change", e => setDone(u.id, e.target.checked));
+}
+function pageReview(m) {
+  const unlocked = store.get("unlock", {})[m.slug];
+  const head = crumbs(`<a href="#/">Home</a>`, `<a href="#/m/${m.slug}">Module ${modNum(m)}</a>`, "instructor review");
+  if (!unlocked) {
+    C().innerHTML = head + `<h1>Instructor review: ${esc(modShort(m))}</h1>
+      <div class="card warn"><h3>Attempt the module first</h3>
+      <p>This page shows the reference solutions, the faster alternatives and the grading checklist. Reading it before you have
+      written your own code removes most of what the module can teach you.</p>
+      <p>Finish the exercises and project and ask Claude for a review. Then come back and compare.</p>
+      <button class="primary" id="unlock">I've attempted this module: show the review</button>
+      <a href="#/m/${m.slug}" style="margin-left:12px">Back to the lesson</a></div>`;
+    $("#unlock").onclick = () => { const u = store.get("unlock", {}); u[m.slug] = true; store.set("unlock", u); pageReview(m); };
+    return;
+  }
+  C().innerHTML = head + `<p style="font-size:13px">Solution code: <a href="${fileURL(m.solDir)}">${esc(m.solDir)}</a></p><div id="md"></div>`;
+  const el = $("#md"); el.innerHTML = md(m.review || "_No REVIEW.md found._"); enhance(el, m.solDir); toc(el);
+}
+
+// ---------- router ----------
+function route() {
+  const h = location.hash || "#/";
+  let r;
+  if (h === "#/" || h === "#") pageHome();
+  else if (h === "#/howto") pageHowto();
+  else if (h === "#/resources") pageResources();
+  else if ((r = h.match(/^#\/m\/([^/]+)(?:\/(u)\/([^/]+)|\/(review))?$/))) {
+    const m = DATA.modules.find(x => x.slug === r[1]);
+    if (!m) return pageHome();
+    if (r[2]) { const u = m.units.find(x => x.name === r[3]); u ? pageUnit(m, u) : pageLesson(m); }
+    else if (r[4]) pageReview(m);
+    else pageLesson(m);
+  } else return; // in-page anchor: leave the view alone
+  store.set("last", h);
+  renderNav();
+  $("#main").scrollTop = 0;
+  document.body.classList.remove("nav-open");
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-copy]");
+  if (b) {
+    const text = b.dataset.copy;
+    const ok = () => { b.textContent = "Copied"; setTimeout(() => b.textContent = "Copy", 1200); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, () => selectCode(b));
+    else selectCode(b);
+  }
+  const a = e.target.closest("a[data-anchor], #content a[href^='#']:not([href^='#/'])");
+  if (a) { e.preventDefault(); const t = document.getElementById(a.getAttribute("href").slice(1)); if (t) t.scrollIntoView({ behavior: "smooth" }); }
+});
+function selectCode(b) { const c = b.previousElementSibling, r = document.createRange(); r.selectNodeContents(c); const s = getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = "Press Ctrl+C"; }
+$("#filter").addEventListener("input", renderNav);
+$("#menu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
+window.addEventListener("hashchange", route);
+
+if (!location.hash) { const last = store.get("last", ""); if (last) history.replaceState(null, "", last); }
+renderProgress();
+route();
+</script>
+</body>
+</html>

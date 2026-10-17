@@ -1,0 +1,8 @@
+{
+  "name": "inventory-api",
+  "listen": "127.0.0.1:9090",
+  "timeout": "1m30s",
+  "max_conns": 250,
+  "tags": ["prod", "eu-west"],
+  "debug": true
+}

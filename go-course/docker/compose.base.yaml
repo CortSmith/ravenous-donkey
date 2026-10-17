@@ -1,0 +1,18 @@
+# Shared service definition. Every compose.yaml in the course extends the `go`
+# service below; this file is never run on its own.
+#
+# Relative paths here are resolved from this file's directory (docker/), so
+# `..` is the course root wherever the extending compose file lives.
+services:
+  go:
+    build: .
+    image: gocourse-dev:1.24.2
+    working_dir: /course
+    # Run as your host user so files the container creates (fuzz corpora,
+    # golden files, binaries) are owned by you, not root. Set UID/GID in a
+    # .env file if your IDs are not 1000 (see modules/00-setup/README.md).
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ..:/course
+      - gomod:/cache/mod
+      - gobuild:/cache/go-build

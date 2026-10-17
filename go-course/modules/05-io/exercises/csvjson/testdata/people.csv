@@ -1,0 +1,8 @@
+id,name,email,city,note
+1,Ada Lovelace,ada@example.com,London,"First programmer, arguably"
+2,Grace Hopper,grace@example.com,Arlington,"Said ""It's easier to ask forgiveness than it is to get permission."""
+3,Rob Pike,,Sydney,"Wrote ""Go Proverbs""
+and co-created Go"
+4,Kōichi Tanaka,koichi@example.jp,東京,
+
+5,Ken Thompson,ken@example.com,"Berkeley, CA",<b>Unix</b> & B
